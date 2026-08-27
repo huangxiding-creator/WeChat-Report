@@ -1,0 +1,28 @@
+# WeChat-Report — 依赖
+# 安装：pip install -r requirements.txt
+# 国内加速：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 截图（高速）
+mss>=9.0
+
+# 窗口定位与鼠标控制
+pyautogui>=0.9.54
+pygetwindow>=0.0.9 ; sys_platform == "win32"
+
+# 图像处理
+opencv-python>=4.8
+numpy>=1.24
+pillow>=10.0
+
+# OCR（轻量，CPU 离线，中文友好）
+rapidocr-onnxruntime>=1.3.8
+
+# Word 报告生成
+python-docx>=1.1.0
+lxml>=4.9
+
+# 智谱 AI / 企业微信通知
+requests>=2.31
+
+# GUI
+customtkinter>=5.2

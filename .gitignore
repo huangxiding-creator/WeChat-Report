@@ -1,0 +1,35 @@
+# 密钥与本地配置（绝不入库）
+config.ini
+config.local.ini
+
+# 运行产物
+output/
+*.log
+_temp/
+checkpoints/
+
+# 本机诊断脚本与截图（不入库）
+_probe_*.py
+_probe_*.png
+_e2e_*.log
+_report_dump.txt
+
+# 内部工作文档（不对外发布）
+PROPOSAL.md
+开发初步想法/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+*.spec
+
+# IDE / 系统
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
