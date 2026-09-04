@@ -118,53 +118,68 @@ class BatchExporter:
                 self.say(f"⏭ [{i}/{res.total}] 「{name}」已完成（断点跳过）")
                 continue
             self.say(f"\n───── [{i}/{res.total}] 「{name}」 ─────")
-            try:
-                # 导航：滚动列表查找并打开（已有 open+verify 双重确认）
-                nav = WeChatNavigator(win, guard,
-                                      settle_wait=self.cfg.get_float(
-                                          "extract", "settle_wait", 1.5),
-                                      input_zone_ratio=guard.input_zone_ratio)
-                # start_from_current：名单按列表顺序排列，从当前位置续扫省时；
-                # expected_items：按列表总长放大扫描轮数（活跃账号 200+ 项）
-                if not nav.open_chat(name, on_progress=self.say,
-                                     expected_items=n_all,
-                                     start_from_current=True):
-                    raise RuntimeError("会话列表中未找到（或点击验证失败）")
-                # 采集（already_open：跳过 extract 内部导航）
-                chat = ext.extract(name, time_window, self.say,
-                                   already_open=True)
-                # 整理成独立 word（无 AI）
-                from .report.transcript_docx import build_transcript_docx
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                docx_path = out_dir / f"{_safe(name)}_聊天记录_{stamp}.docx"
-                build_transcript_docx(chat, docx_path,
-                                      time_window=time_window,
-                                      max_images=max_images)
-                kb = docx_path.stat().st_size / 1024
-                self.say(f"💾 「{name}」完成：{len(chat.messages)} 条 → "
-                         f"{docx_path.name}（{kb:.0f} KB）")
-                res.done += 1
-                res.messages += len(chat.messages)
-                res.docx_files.append(str(docx_path))
-                progress[name] = {"messages": len(chat.messages),
-                                  "docx": str(docx_path),
-                                  "at": datetime.now().isoformat(timespec="seconds")}
-                self._save_progress(progress_path, progress)
-                if res.done % report_every == 0:
-                    el = int(time.monotonic() - t0)
-                    avg = el // max(res.done, 1)
-                    eta = avg * (res.total - i)
-                    self._notify(f"【批量导出进度】{i}/{res.total}\n"
-                                 f"已完成 {res.done} · 失败 {res.failed} · "
-                                 f"累计 {res.messages} 条\n"
-                                 f"平均 {avg}s/个 · 预计剩余 ≈ {eta // 60} 分钟")
-            except Exception as e:
+            ok = False
+            last_err: Optional[Exception] = None
+            for attempt in (1, 2):
+                if attempt == 2:
+                    # fail-safe 人工碰角重试：等鼠标离开角落后原目标再试一次
+                    #（目标 1 实测：15 分钟上滚成果被一次碰角全部作废）。
+                    # 持续按住角落 = 人为停机，等待不打扰；杀进程仍可随时终止。
+                    if last_err is None or "fail-safe" not in str(last_err).lower():
+                        break
+                    self.say("   🖱 fail-safe（鼠标碰角）——等待鼠标离开角落后重试本聊天")
+                    _wait_mouse_off_corner(self.say)
+                try:
+                    # 导航：滚动列表查找并打开（已有 open+verify 双重确认）
+                    nav = WeChatNavigator(win, guard,
+                                          settle_wait=self.cfg.get_float(
+                                              "extract", "settle_wait", 1.5),
+                                          input_zone_ratio=guard.input_zone_ratio)
+                    # start_from_current：名单按列表顺序排列，从当前位置续扫省时；
+                    # expected_items：按列表总长放大扫描轮数（活跃账号 200+ 项）
+                    if not nav.open_chat(name, on_progress=self.say,
+                                         expected_items=n_all,
+                                         start_from_current=True):
+                        raise RuntimeError("会话列表中未找到（或点击验证失败）")
+                    # 采集（already_open：跳过 extract 内部导航）
+                    chat = ext.extract(name, time_window, self.say,
+                                       already_open=True)
+                    # 整理成独立 word（无 AI）
+                    from .report.transcript_docx import build_transcript_docx
+                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    docx_path = out_dir / f"{_safe(name)}_聊天记录_{stamp}.docx"
+                    build_transcript_docx(chat, docx_path,
+                                          time_window=time_window,
+                                          max_images=max_images)
+                    kb = docx_path.stat().st_size / 1024
+                    self.say(f"💾 「{name}」完成：{len(chat.messages)} 条 → "
+                             f"{docx_path.name}（{kb:.0f} KB）")
+                    res.done += 1
+                    res.messages += len(chat.messages)
+                    res.docx_files.append(str(docx_path))
+                    progress[name] = {"messages": len(chat.messages),
+                                      "docx": str(docx_path),
+                                      "at": datetime.now().isoformat(timespec="seconds")}
+                    self._save_progress(progress_path, progress)
+                    if res.done % report_every == 0:
+                        el = int(time.monotonic() - t0)
+                        avg = el // max(res.done, 1)
+                        eta = avg * (res.total - i)
+                        self._notify(f"【批量导出进度】{i}/{res.total}\n"
+                                     f"已完成 {res.done} · 失败 {res.failed} · "
+                                     f"累计 {res.messages} 条\n"
+                                     f"平均 {avg}s/个 · 预计剩余 ≈ {eta // 60} 分钟")
+                    ok = True
+                    break
+                except Exception as e:
+                    last_err = e
+            if not ok:
                 res.failed += 1
-                res.errors[name] = str(e)[:200]
-                self.say(f"   ✗ 「{name}」失败：{e}")
-                log.warning("导出 %s 失败：%s", name, e, exc_info=True)
+                res.errors[name] = str(last_err)[:200]
+                self.say(f"   ✗ 「{name}」失败：{last_err}")
+                log.warning("导出 %s 失败：%s", name, last_err, exc_info=True)
                 # 失败也记录，避免断点重跑时反复撞墙
-                progress[name] = {"error": str(e)[:200],
+                progress[name] = {"error": str(last_err)[:200],
                                   "at": datetime.now().isoformat(timespec="seconds")}
                 self._save_progress(progress_path, progress)
             # 每个聊天之间稍歇，降低微信渲染压力
