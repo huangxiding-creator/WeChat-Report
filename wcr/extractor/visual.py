@@ -167,7 +167,18 @@ class VisualExtractor(BaseExtractor):
                 if self.checkpoint_enabled:
                     composer.save_checkpoint(ckpt)
             if not moved:
-                say(f"   ✔ 画面不再变化，采集完成（共 {screen_idx} 屏）")
+                # 下滚冻结甄别：懒加载/负载会整段吞档（实测目标「黄藏寺项目
+                # 值班」5 屏即停、只采到 1 天）——歇一拍再冲一屏，三重确认
+                # 仍不动才算采集完成；冲开了就继续正常循环
+                time.sleep(1.2)
+                if scroller.scroll_down_one_screen():
+                    screen_idx += 1
+                    continue
+                time.sleep(1.5)
+                if scroller.scroll_down_one_screen():
+                    screen_idx += 1
+                    continue
+                say(f"   ✔ 画面不再变化（三重确认），采集完成（共 {screen_idx} 屏）")
                 break
             if zero_add_screens >= 20:
                 say(f"   ⚠ 连续 {zero_add_screens} 屏无新增消息（可能有动图/视频在播放），停止")

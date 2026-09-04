@@ -57,7 +57,10 @@ class BatchExporter:
                 progress.pop(k)
 
         from .pipeline import make_visual_extractor
-        ext = make_visual_extractor(self.cfg, out_dir, scrollup_mode="top")
+        # probe 模式：上滚逐屏 OCR 探测，见到早于窗起点的标签即停；文本集
+        # 连续稳定 = 到缓存顶（GIF 动图免疫）；900s 预算兜底。top 模式实测
+        # 会在缓存顶转轮上 800 档空转 10 分钟（懒加载转轮让帧差永不相等）
+        ext = make_visual_extractor(self.cfg, out_dir, scrollup_mode="probe")
         max_images = self.cfg.get_int("batch", "max_images_embed", 50)
         report_every = self.cfg.get_int("batch", "report_every", 5)
         skip_names = self._skip_names()
@@ -70,6 +73,11 @@ class BatchExporter:
             win, guard, on_progress=self.say,
             max_rounds=self.cfg.get_int("batch", "enum_rounds", 160))
         names = enumerator.enumerate(skip=skip_names)
+        # 采戳自诊断：戳字典大小 + 年份戳样本（预过滤覆盖率异常时定位用）
+        st_n = len(enumerator.stamps)
+        st_year = sum(1 for v in enumerator.stamps.values()
+                      if any(y in v for y in ("2024", "2025", "2026", "2O24", "2U24")))
+        self.say(f"   采戳：{st_n} 名有时间戳（其中年份戳 {st_year}）")
         deduped = dedupe_names(names)
         if len(deduped) != len(names):
             self.say(f"   枚举去重：{len(names)} → {len(deduped)}（OCR 变体合并）")

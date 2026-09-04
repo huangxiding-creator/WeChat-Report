@@ -206,7 +206,7 @@ build.bat                PyInstaller 绿色打包
 ## 🧪 测试
 
 ```bash
-python -m unittest discover -s tests -v   # 103 个用例，无需微信/AI即可跑
+python -m unittest discover -s tests -v   # 109 个用例，无需微信/AI即可跑
 ```
 
 ### 真机实测（微信 4.1，Windows 10）

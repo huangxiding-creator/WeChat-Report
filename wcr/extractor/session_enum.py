@@ -93,13 +93,16 @@ def cluster_sessions(ocr_texts: list[dict], list_width: int = 0,
     缺省 = ocr_texts 本身。
     """
     right_lim = int((list_width or 10 ** 6) * 0.72)
-    # 采戳全集：噪声滤/阈值滤之前的低分块（时间戳是淡灰小字）
+    # 采戳全集：噪声滤/阈值滤之前的低分块（时间戳是淡灰小字）。
+    # 注意与名称管道相互独立：名称仍用调用方传入（已按 0.4 阈值滤）的
+    # ocr_texts，只加 y 下限；不要从 raw_texts 派生名称（会把 0.28 低分
+    # 噪声灌进名称管道）。
     raw_texts = [t for t in (stamp_texts if stamp_texts is not None else ocr_texts)
                  if (t.get("text") or "").strip()]
     # y 下限：搜索框/悬浮头锚点区（cy < 22）的任何文本都不是会话行——
     # 锚点 OCR 变体无穷（以搜索/reILILy rU: s≤TSH/X…），逐个正则堵不完，
     # 结构上按位置丢弃更可靠（首行会话名 cy ≥ 25，实测真顶 30~47）
-    ocr_texts = [t for t in raw_texts if t.get("cy", 0) >= 22]
+    ocr_texts = [t for t in ocr_texts if t.get("cy", 0) >= 22]
     items = []
     for t in ocr_texts:
         txt = (t["text"] or "").strip()
@@ -263,6 +266,7 @@ class SessionEnumerator:
         seen: set[str] = set()
         prev_screen: list[str] = []   # 上一屏名称（OCR 变体判断用）
         stable = 0
+        bottom_verify = 0   # 底验证次数：连续零新增 ≠ 到底（中途冻结甄别）
         self.say("🗂 枚举会话列表（滚动 + OCR）…")
 
         # 先回到列表顶部（距离制 + 搜索框锚点确认）
@@ -287,10 +291,23 @@ class SessionEnumerator:
             if genuine == 0:
                 stable += 1
                 if stable >= self.stable_rounds:
-                    self.say(f"   会话列表已到底（共 {len(names)} 个会话）")
-                    break
+                    if bottom_verify >= 3:
+                        self.say(f"   会话列表已到底（共 {len(names)} 个会话，"
+                                 "3 次底验证均无新增）")
+                        break
+                    bottom_verify += 1
+                    stable = 0
+                    # 中途冻结甄别：负载下列表会整段卡住（实测 64 档零位移
+                    # 后瞬间恢复），"连续零新增"≠到底——大力滚一屏冲开冻结
+                    # 再看一轮；真到底时多滚无害（列表不动，多花几秒）。
+                    # 冻结容限 = 3×(3轮×4档 + 24档) = 108 档 > 实测 64 档。
+                    self.say(f"   疑似到底（{len(names)} 个），"
+                             f"大力滚动验证 {bottom_verify}/3 …")
+                    self._scroll_list(cap, -120, 24)
+                    time.sleep(2.0)
             else:
                 stable = 0
+                bottom_verify = 0
             self._scroll_list(cap, -120, 4)   # 往下滚 4 档 ≈ 一屏会话
             time.sleep(self.scroll_pause)
             if rnd % 5 == 4:

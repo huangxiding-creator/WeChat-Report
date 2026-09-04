@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from wcr.extractor.capture import ScreenCapture, imwrite_png
+from wcr.extractor.capture import ScreenCapture, imread_png, imwrite_png
 
 
 class TestImwriteUnicode(unittest.TestCase):
@@ -18,6 +18,24 @@ class TestImwriteUnicode(unittest.TestCase):
         self.assertTrue(imwrite_png(p, img))
         self.assertTrue(p.exists())
         self.assertGreater(p.stat().st_size, 100)
+
+
+class TestImreadUnicode(unittest.TestCase):
+    def test_cjk_path_readback(self):
+        """中文路径读图：cv2.imread 在 Windows 直接返回 None（实测批量导出
+        目录下全部 WARN can't open），必须走 imread_png 读回。"""
+        d = Path(tempfile.mkdtemp()) / "批量导出" / "黄藏寺项目值班"
+        p = d / "screen0001_img00.png"
+        img = np.arange(40 * 60 * 3, dtype=np.uint8).reshape(40, 60, 3)
+        self.assertTrue(imwrite_png(p, img))
+        back = imread_png(p)
+        self.assertIsNotNone(back)
+        self.assertEqual(back.shape, img.shape)
+        self.assertTrue((back == img).all())
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(imread_png("Z:/不存在/图.png"))
+        self.assertIsNone(imread_png(Path(tempfile.mkdtemp()) / "空.txt"))
 
     def test_creates_parent_dirs(self):
         p = Path(tempfile.mkdtemp()) / "新建文件夹" / "a" / "b.png"

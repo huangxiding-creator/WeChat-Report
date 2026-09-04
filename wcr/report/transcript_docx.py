@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -29,6 +30,35 @@ GREEN = RGBColor(0x00, 0x66, 0x00)
 
 # 图片 OCR 引擎单例（docx 生成阶段惰性加载，离线、零微信交互）
 _OCR_ENGINE = None
+
+# ---------- UI 噪声过滤（渲染层） ----------
+# OCR 从文件卡片/时间戳碎片读出的伪消息（实测目标[1] docx）：
+#   '86.6K'（文件大小）、':38'（时钟残片）、'PDF'/'and'/'Bne'（≤3 位拉丁
+#   碎片，HZSMemo 判据 <4 位不构成有效内容）。
+# 保守原则：纯数字（"12" 回复）保留；常见真实短回复白名单保留。
+_NOISE_KEEP = {"ok", "okay", "no", "yes", "hi", "hello", "good", "fine"}
+_UI_NOISE = re.compile(
+    r"^(?:\d+(?:\.\d+)?[KMGkmg]"        # 带单位大小：86.6K、3M（纯数字保留）
+    r"|[QO\d]{0,2}[:：]\d{1,2}"         # 时钟残片：:38、7:38、14:05
+    r"|[A-Za-z]{1,3})$")                # 短拉丁碎片：and、Bne、PDF
+
+
+def _is_ui_noise(text: str) -> bool:
+    """文本是否为 UI 噪声（不渲染入档）。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return _UI_NOISE.match(t) is not None and t.lower() not in _NOISE_KEEP
+
+
+def _is_bad_speaker(speaker: str) -> bool:
+    """说话人读数是否为 UI 噪声（如 '86.6K'/'581'/'and'）→ 不显示前缀。"""
+    s = (speaker or "").strip()
+    if not s:
+        return False
+    if _is_ui_noise(s):
+        return True
+    return bool(re.fullmatch(r"[\d\s.]+", s))   # 纯数字（文件大小/计数）
 
 
 def _has_meaningful(text: str) -> bool:
@@ -56,10 +86,13 @@ def _ocr_image_notes(img_path: str, max_lines: int = 10) -> list[str]:
     global _OCR_ENGINE
     try:
         import cv2
+        from ..extractor.capture import imread_png
         from ..extractor.ocr import OCRParser
         if _OCR_ENGINE is None:
             _OCR_ENGINE = OCRParser(0.5)
-        img = cv2.imread(img_path)
+        # cv2.imread 在 Windows 读不了中文路径（批量导出目录名即中文），
+        # 必须走 imread_png（np.fromfile + imdecode）
+        img = imread_png(img_path)
         if img is None:
             return []
         h, w = img.shape[:2]
@@ -85,10 +118,17 @@ def build_transcript_docx(chat: Chat, out_path: Path,
     """Chat → 聊天记录整理 docx（无 AI 参与，零成本，秒级完成）。"""
     doc = Document()
 
+    def _sp(m) -> str:
+        """说话人前缀（噪声读数如 '86.6K' 不显示，保留消息本体）。"""
+        if _is_bad_speaker(m.speaker):
+            return "【我】" if m.side == "right" else ""
+        return _speaker(m)
+
     # ---------- 标题 + meta ----------
     title = doc.add_heading(f"{chat.name} · 聊天记录", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    n_text = sum(1 for m in chat.messages if m.kind == "text")
+    n_text = sum(1 for m in chat.messages
+                 if m.kind == "text" and not _is_ui_noise(m.text))
     n_img = sum(1 for m in chat.messages if m.kind == "image")
     n_voice = sum(1 for m in chat.messages if m.kind == "voice")
     ts_list = [m.timestamp for m in chat.messages if m.timestamp]
@@ -126,13 +166,13 @@ def build_transcript_docx(chat: Chat, out_path: Path,
 
         if m.kind == "voice":
             p = doc.add_paragraph()
-            r = p.add_run(f"{_speaker(m)} ")
+            r = p.add_run(f"{_sp(m)} ")
             _fmt_speaker(r)
             p.add_run(f"〔语音 {m.text}〕")
             _fmt_time(p, m)
         elif m.kind == "image":
             p = doc.add_paragraph()
-            r = p.add_run(f"{_speaker(m)} ")
+            r = p.add_run(f"{_sp(m)} ")
             _fmt_speaker(r)
             p.add_run("[图片]")
             _fmt_time(p, m)
@@ -160,8 +200,10 @@ def build_transcript_docx(chat: Chat, out_path: Path,
                         r2.font.size = Pt(8)
                         r2.font.color.rgb = DARK
         else:  # text
+            if _is_ui_noise(m.text):
+                continue            # UI 噪声（86.6K / :38 / and）不入档
             p = doc.add_paragraph()
-            sp = _speaker(m)
+            sp = _sp(m)
             if sp:
                 r = p.add_run(f"{sp} ")
                 _fmt_speaker(r)

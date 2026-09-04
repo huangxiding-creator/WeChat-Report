@@ -559,5 +559,144 @@ class TestImageOcrNote(unittest.TestCase):
                         f"OCR 未识别: {notes}")
 
 
+class TestEnumFreezeRobustBottom(unittest.TestCase):
+    """到底判定加固：连续零新增先做"大力滚动验证"（中途冻结会恢复）。
+
+    实测教训（2026-09-05 晨）：负载下列表整段卡住，3 轮零新增即断底，
+    629 项的列表只枚举出 74 个——必须冲开冻结复验，3 次均无新增才认底。
+    """
+
+    def _screen(self, *names_):
+        return [{"text": n, "cx": 120, "cy": 40 + 65 * i, "score": 0.9}
+                for i, n in enumerate(names_)]
+
+    def _run(self, screens, max_rounds=24):
+        import sys
+        from unittest import mock
+        import wcr.extractor.session_enum as se
+
+        script = list(screens)
+
+        class _FakeOCR:
+            def __init__(self, _thr):
+                self._i = 0
+
+            def parse_raw(self, _img, floor=0.1):
+                i = min(self._i, len(script) - 1)
+                self._i += 1
+                return script[i]
+
+        class _FakeCap:
+            def __init__(self, _region=None):
+                pass
+
+            def grab(self):
+                import numpy as np
+                return np.zeros((10, 10, 3), dtype=np.uint8)
+
+        class _FakeWin:
+            rect = (0, 0, 900, 700)
+
+            def activate(self):
+                pass
+
+            def session_list_rect(self):
+                return (0, 0, 248, 600)
+
+        class _FakeGuard:
+            def check_scroll(self, *_a):
+                pass
+
+        said: list[str] = []
+        en = se.SessionEnumerator(_FakeWin(), _FakeGuard(),
+                                  scroll_pause=0, max_rounds=max_rounds,
+                                  on_progress=said.append)
+        with mock.patch.object(se, "ScreenCapture", _FakeCap), \
+                mock.patch.object(se, "OCRParser", _FakeOCR), \
+                mock.patch("wcr.extractor.navigator."
+                           "scroll_session_list_to_top"), \
+                mock.patch("time.sleep"), \
+                mock.patch.dict(sys.modules, {"pyautogui": mock.MagicMock()}):
+            names = en.enumerate()
+        return names, said
+
+    def test_freeze_recovers_not_bottom(self):
+        """冻结 6 轮（两次触发验证）后恢复出新名 → 不断底，继续枚举。"""
+        ab = self._screen("会话A", "会话B")
+        # 恢复后的名字取互不相似的真实名池（一字之差会被 name_variant
+        # 聚成变体、不计新增，测不出"持续枚举"）
+        bank = ["大有咨询王博", "晓星所长林超", "黄春健同学", "赵嫣嫣AI事务所",
+                "河美恬园8号楼业主群", "2028届八年级14班", "总包之声UP主",
+                "度量衡工程咨询", "天使小镇丹丹", "竹言墨雨原创",
+                "新疆兵团设计院", "钧棋136749694202", "隋梓晨爸爸151",
+                "刘宇峰设计", "陶学长教室", "李四丰台账", "王李四丰工程部",
+                "黄建国项目组", "HZS对下支付管理", "黄藏寺现场处置组",
+                "鱼儿他江志红", "七年级14班达善", "黄藏寺机电安装标段",
+                "河美恬园物业服务中心", "大有咨询李工", "总包学园济南站",
+                "工程豹用户交流", "度量衡招标代理", "尤视光近视防控护眼灯",
+                "赵氏健康管理"]
+        tail = [self._screen(bank[i], bank[i + 1]) for i in range(0, 28, 2)]
+        screens = [ab] * 8 + [self._screen("会话C", "会话D")] + tail
+        names, said = self._run(screens)
+        joined = "\n".join(said)
+        self.assertIn("会话C", names)
+        # 冻结若被误判为到底会在第 ~13 轮 break，等不到第 20 轮日志
+        self.assertIn("（第 20 轮）", joined)      # 恢复后一直枚举到预算用尽
+        self.assertNotIn("已到底", joined)        # 冻结未被误判为到底
+        self.assertIn("大力滚动验证 1/3", joined)
+
+    def test_real_bottom_needs_three_verifies(self):
+        """真到底：3 次大力滚动验证均无新增才认底。"""
+        ab = self._screen("会话A", "会话B")
+        names, said = self._run([ab] * 24)
+        joined = "\n".join(said)
+        self.assertEqual(names, ["会话A", "会话B"])
+        self.assertIn("已到底", joined)
+        for i in (1, 2, 3):
+            self.assertIn(f"大力滚动验证 {i}/3", joined)
+
+
+class TestUiNoiseFilter(unittest.TestCase):
+    """渲染层 UI 噪声过滤：文件卡片大小/时钟残片/短拉丁碎片不入档。"""
+
+    def test_noise_texts_dropped(self):
+        from wcr.report.transcript_docx import _is_ui_noise
+        for t in ("86.6K", "3M", "12.5k", ":38", "7:38", "14:05",
+                  "and", "Bne", "PDF", "reILILy"[:3]):
+            self.assertTrue(_is_ui_noise(t), t)
+
+    def test_real_texts_kept(self):
+        from wcr.report.transcript_docx import _is_ui_noise
+        for t in ("收到", "12", "ok", "OK", "HZS对下支付管理", "明早7:30出发"):
+            self.assertFalse(_is_ui_noise(t), t)
+
+    def test_bad_speakers(self):
+        from wcr.report.transcript_docx import _is_bad_speaker
+        for s in ("86.6K", "581", "and", ":38"):
+            self.assertTrue(_is_bad_speaker(s), s)
+        for s in ("", "刘浩总包部安全", "张俊伟岱海"):
+            self.assertFalse(_is_bad_speaker(s), s)
+
+    def test_docx_render_skips_noise(self):
+        """端到端：噪声文本不渲染、噪声说话人被清洗（消息本体保留）。"""
+        msgs = [
+            Message(kind="text", text="86.6K", side="left",
+                    speaker="86.6K", timestamp=datetime(2026, 8, 20, 10, 0)),
+            Message(kind="text", text="值班表已发", side="left",
+                    speaker="86.6K", timestamp=datetime(2026, 8, 20, 10, 1)),
+            Message(kind="text", text="收到", side="left",
+                    speaker="刘浩", timestamp=datetime(2026, 8, 20, 10, 2)),
+        ]
+        chat = Chat(name="测试群", messages=msgs, captured_at="", time_window="")
+        out = Path(tempfile.mkdtemp()) / "t.docx"
+        build_transcript_docx(chat, out)
+        doc = Document(str(out))
+        joined = "\n".join(p.text for p in doc.paragraphs)
+        self.assertNotIn("86.6K", joined)          # 噪声消息不渲染
+        self.assertIn("值班表已发", joined)          # 噪声说话人的消息保留
+        self.assertNotIn("【86.6K】", joined)        # 坏说话人不做前缀
+        self.assertIn("【刘浩】 收到", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

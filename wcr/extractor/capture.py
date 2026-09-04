@@ -20,6 +20,22 @@ def imwrite_png(path, img) -> bool:
     return ok
 
 
+def imread_png(path):
+    """中文路径安全读图：cv2.imread 在 Windows 对非 ASCII 路径直接返回
+    None（实测 output/批量导出/…png 全部 WARN can't open），统一走
+    np.fromfile + imdecode。失败返回 None（调用方静默降级）。
+    """
+    import cv2
+
+    try:
+        buf = np.fromfile(str(path), dtype=np.uint8)
+    except (OSError, ValueError):
+        return None
+    if buf.size == 0:
+        return None
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
 class ScreenCapture:
     """对指定屏幕区域高速截图，返回 numpy BGR 数组。"""
 
