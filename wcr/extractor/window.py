@@ -169,11 +169,17 @@ class WeChatWindow:
         return (x0, top + int(height * 0.045), w_panel, max(36, int(height * 0.075)))
 
     def session_list_rect(self) -> tuple[int, int, int, int]:
-        """会话列表区（绝对坐标）：图标栏右侧到分界线。"""
+        """会话列表区（绝对坐标）：图标栏右侧到分界线。
+
+        实测（微信 4.1，704px 高窗口）：列表一直延伸到窗口底缘附近
+        （条目可见至 y≈0.97H）。旧值 0.65H 把底部 2~4 个会话行
+        切出 OCR 范围（白思俊/GM/刘宇峰 一度"不可见"）。
+        """
         left, top, width, height = self.rect
         x0 = left + max(64, int(width * 0.045))
         x1 = left + self.chat_left_rel - 10
-        return (x0, top + int(height * 0.08), max(60, x1 - x0), int(height * 0.65))
+        y0 = top + int(height * 0.08)
+        return (x0, y0, max(60, x1 - x0), int(height * 0.90))
 
     def search_box_center(self) -> tuple[int, int]:
         left, top, width, height = self.rect

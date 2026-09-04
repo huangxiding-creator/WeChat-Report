@@ -52,9 +52,27 @@ class SafetyGuard:
         if x < left or x > left + width or y < top:
             raise ReadOnlyViolation(f"只读保护：点击坐标 ({x},{y}) 超出微信窗口范围。")
 
-    def check_nav_click(self, x: int, y: int, win_rect: tuple) -> None:
-        """导航点击（搜索框 / 会话列表）：限制在窗口左侧行政区 + 顶部 40% 内。"""
+    def check_nav_click(self, x: int, y: int, win_rect: tuple,
+                        session_rect: Optional[tuple] = None) -> None:
+        """导航点击（搜索框 / 会话列表）：限制在窗口左侧行政区 + 上半屏内。
+
+        session_rect（会话列表矩形）范围内的点击按列表实际范围放行：
+        会话列表列内只有会话项（输入区在右侧聊天面板，x > 列表右缘），
+        而 nav_bottom（55% 高度）会永久屏蔽列表底缘 1~2 个会话项——
+        它们在列表尽头无法再滚入上半屏。窗口底部输入禁区（input_zone_ratio）
+        仍然硬性生效（check_click 先行校验）。
+        """
         left, top, width, height = win_rect
+        if session_rect:
+            sx, sy, sw, sh = session_rect
+            if sx - 4 <= x <= sx + sw + 4 and sy <= y <= sy + sh - 8:
+                # 会话列内：列里只有会话行（输入区在右侧聊天面板），
+                # 输入禁区（0.80H）是为聊天面板设计的，不适用于本列；
+                # 仅校验不越出微信窗口
+                if x < left or x > left + width or y < top or y > top + height:
+                    raise ReadOnlyViolation(
+                        f"只读保护：点击坐标 ({x},{y}) 超出微信窗口范围。")
+                return
         self.check_click(x, y, win_rect)
         nav_right = left + int(width * 0.30)      # 左侧会话列表 + 搜索区
         nav_bottom = top + int(height * 0.55)     # 上半屏

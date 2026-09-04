@@ -81,7 +81,14 @@ pip install -r requirements.txt
 # 国内加速：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 python main.py            # GUI
 python main.py --cli --chats "群名" --window 7d --template work
+
+# 批量导出：枚举全部会话，每个聊天一份"聊天记录整理"word（无 AI、零成本）
+python main.py --cli --all --window 365d
+python main.py --cli --all --limit 3 --window 365d   # 先试点 3 个
 ```
+
+> 批量模式会长时间占用鼠标（逐聊天滚动采集），期间请勿操作电脑；
+> 支持断点续跑（`output/批量导出/_batch_progress.json`），中断后原命令重跑即续。
 
 ### 运行前提
 
@@ -116,6 +123,9 @@ python main.py --cli --chats "群名" --window 7d --template work
 | `[notify]` | `webhook` | 企业微信机器人（或环境变量 `WCR_WECOM_WEBHOOK`） |
 | | `milestones` | 哪些节点要通知：`start,extract,analyze,report,done` |
 | | `send_report_file` | 是否把最终 docx 推送到企业微信（≤20MB） |
+| `[batch]` | `skip_names` | 批量模式跳过的系统会话（微信团队/订阅号消息等） |
+| | `max_images_embed` | 每份聊天记录 word 最多嵌入图片数（控制文件大小） |
+| | `report_every` | 每完成 N 个聊天企业微信汇报一次进度 |
 | `[safety]` | `input_zone_ratio` | 底部输入禁区比例（默认 0.80，勿轻易改） |
 
 完整默认值见 [config.example.ini](config.example.ini)。
@@ -196,7 +206,7 @@ build.bat                PyInstaller 绿色打包
 ## 🧪 测试
 
 ```bash
-python -m unittest discover -s tests -v   # 46 个用例，无需微信/AI即可跑
+python -m unittest discover -s tests -v   # 103 个用例，无需微信/AI即可跑
 ```
 
 ### 真机实测（微信 4.1，Windows 10）

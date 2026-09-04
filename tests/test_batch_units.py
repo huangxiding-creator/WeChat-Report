@@ -1,0 +1,563 @@
+# -*- coding: utf-8 -*-
+"""批量导出测试：会话列表聚簇（纯函数）+ 聊天记录 docx 生成。"""
+import tempfile
+import unittest
+from datetime import datetime
+from pathlib import Path
+
+from docx import Document
+
+from wcr.extractor.navigator import (at_list_top, fuzzy_same,
+                                     match_session, scaled_scan_rounds,
+                                     window_contains)
+from wcr.extractor.safety import ReadOnlyViolation, SafetyGuard
+from wcr.extractor.session_enum import (DEFAULT_SKIP, cluster_sessions,
+                                         merge_round_names)
+from wcr.batch import dedupe_names
+from wcr.models import Chat, Message
+from wcr.report.transcript_docx import build_transcript_docx
+
+
+def ocr_item(text, cx, cy):
+    return {"text": text, "cx": cx, "cy": cy, "score": 0.9}
+
+
+class TestClusterSessions(unittest.TestCase):
+    def test_two_sessions_with_noise(self):
+        """两个会话项（名称+预览+时间+徽标）→ 只提取出两个名称。"""
+        texts = [
+            # 项1（y 90~150）
+            ocr_item("【畅聊1群】", 120, 90),
+            ocr_item("22:17", 220, 90),               # 右侧时间
+            ocr_item("竹言墨雨：找他要5000W刀", 110, 112),  # 预览行
+            # 空白 ~40px
+            # 项2（y 190~250）
+            ocr_item("黄春健", 120, 190),
+            ocr_item("21:36", 222, 190),
+            ocr_item("[7条]黄春健：收到", 110, 212),
+        ]
+        out = cluster_sessions(texts, list_width=248)
+        self.assertEqual([n for n, _ in out], ["【畅聊1群】", "黄春健"])
+
+    def test_filters_time_and_badge(self):
+        """纯时间/徽标文本不进入候选。"""
+        texts = [ocr_item("昨天", 220, 90), ocr_item("[56条]", 230, 112),
+                 ocr_item("天使小镇丹丹", 120, 190), ocr_item("[视频", 110, 212)]
+        out = cluster_sessions(texts, list_width=248)
+        self.assertEqual([n for n, _ in out], ["天使小镇丹丹"])
+
+    def test_empty(self):
+        self.assertEqual(cluster_sessions([], list_width=248), [])
+
+    def test_anchor_zone_dropped_structurally(self):
+        """锚点区（cy<22）任何文本不入名：以搜索/reILILy 乱读都堵死。"""
+        texts = [ocr_item("以搜索", 118, 5), ocr_item("reILILy rU: s≤TSH/X", 110, 8),
+                 ocr_item("黄藏寺项目值班值守", 150, 31)]
+        out = cluster_sessions(texts, list_width=248)
+        self.assertEqual(out, [("黄藏寺项目值班值守", 31)])
+
+    def test_multiline_name_only(self):
+        """预览缺失的项也能提取名称。"""
+        texts = [ocr_item("度量衡工程咨询", 120, 300)]
+        out = cluster_sessions(texts, list_width=248)
+        self.assertEqual(out, [("度量衡工程咨询", 300)])
+
+    def test_strips_fused_date_stamp(self):
+        """OCR 把日期戳粘进长名称尾部（"…专...08/29"）→ 剥离。"""
+        texts = [ocr_item("HZS对下支付管理专...08/29", 120, 90)]
+        out = cluster_sessions(texts, list_width=248)
+        self.assertEqual(out, [("HZS对下支付管理专", 90)])
+
+    def test_name_ending_in_digits_kept(self):
+        """本身以数字结尾的短名（如 "3-2班"）不被误剥。"""
+        texts = [ocr_item("3-2班", 120, 90)]
+        out = cluster_sessions(texts, list_width=248)
+        self.assertEqual(out, [("3-2班", 90)])
+
+    def test_strips_fused_clock_stamp(self):
+        """无省略号前缀粘连的 HH:MM（"值守20:57"）与 昨天+时间 → 剥离。"""
+        for raw, want in (("黄藏寺项目值班值守20:57", "黄藏寺项目值班值守"),
+                          ("新疆兵团设计院昨天14:12", "新疆兵团设计院"),
+                          ("七年级14班达善..昨天11:02", "七年级14班达善")):
+            out = cluster_sessions([ocr_item(raw, 120, 90)], list_width=248)
+            self.assertEqual(out, [(want, 90)], raw)
+
+    def test_strips_fused_year(self):
+        """置顶老聊天粘连年份戳（"钧棋13674969...2024/10"）→ 剥离。"""
+        for raw, want in (("钧棋13674969...2024/10", "钧棋13674969"),
+                          ("隋梓晨爸爸151..2024/", "隋梓晨爸爸151"),
+                          ("大有咨询王博 2024/9", "大有咨询王博")):
+            out = cluster_sessions([ocr_item(raw, 120, 90)], list_width=248)
+            self.assertEqual(out, [(want, 90)], raw)
+
+    def test_pure_numbers_name_kept(self):
+        """纯数字昵称（如 QQ 号 "136749694202"）不被年份规则误剥。"""
+        out = cluster_sessions([ocr_item("136749694202", 120, 90)],
+                               list_width=248)
+        # 202 尾剥后仍 ≥2 字 → 应保留原样（不匹配年月日形态不剥）
+        self.assertEqual(out, [("136749694202", 90)])
+
+
+class TestMatchSession(unittest.TestCase):
+    def test_exact_and_substring(self):
+        found = [("赵嫣嫣AI事务所", 90), ("黄春健", 190)]
+        self.assertEqual(match_session("赵嫣嫣AI事务所", found),
+                         ("赵嫣嫣AI事务所", 90))
+        # 目标名被 OCR 拼上时间戳尾巴 → 子串仍命中
+        self.assertEqual(match_session("赵嫣嫣AI事务所",
+                                       [("赵嫣嫣AI事务所21:18", 90)]),
+                         ("赵嫣嫣AI事务所21:18", 90))
+
+    def test_fuzzy_ocr_variant(self):
+        """AI → AⅠ（罗马数字Ⅰ）等 OCR 变体走模糊匹配。"""
+        found = [("赵嫣嫣AⅠ事务所", 90), ("河美恬园8号楼业主群", 190)]
+        self.assertEqual(match_session("赵嫣嫣AI事务所", found),
+                         ("赵嫣嫣AⅠ事务所", 90))
+
+    def test_no_false_positive(self):
+        found = [("河美恬园8号楼业主群", 190), ("黄藏寺项目值班值守", 300)]
+        self.assertIsNone(match_session("赵嫣嫣AI事务所", found))
+
+    def test_empty(self):
+        self.assertIsNone(match_session("任意", []))
+
+
+class TestFuzzySame(unittest.TestCase):
+    def test_ocr_variant_long_name(self):
+        """长名称 OCR 单字变体（嫣嫣↔景煨）→ 模糊相同。"""
+        self.assertTrue(fuzzy_same("赵嫣嫣AI事务所", "赵景煨AI事务所"))
+
+    def test_distinct_chats_differ(self):
+        self.assertFalse(fuzzy_same("赵嫣嫣AI事务所", "河美恬园8号楼业主群"))
+        self.assertFalse(fuzzy_same("赵嫣嫣AI事务所", "黄藏寺项目值班值守"))
+
+    def test_short_name_strict(self):
+        """3 字名 1 字之差（0.67）判否：短名模糊风险大于收益。"""
+        self.assertFalse(fuzzy_same("黄春健", "黄春徤"))
+        self.assertTrue(fuzzy_same("黄春健", "黄春健"))   # 完全相同仍为真
+
+    def test_shared_digit_run(self):
+        """汉字 OCR 拖低 ratio 时，共享 ≥6 位数字串（手机/QQ号）兜底。"""
+        self.assertTrue(fuzzy_same("钧棋13674969", "匀棋13674969937"))
+        # 数字串不同 → 不兜底
+        self.assertFalse(fuzzy_same("钧棋13674969", "李四13800138000"))
+
+
+class TestComposerWindowDedup(unittest.TestCase):
+    """窗口化去重：重叠屏去重 ✓，历史重复文本不再被折叠 ✓。"""
+
+    def _composer(self):
+        from wcr.extractor.composer import MessageComposer
+        return MessageComposer(speaker_attribution=False)
+
+    def _texts(self, items):
+        import numpy as np
+        out = []
+        for txt, cy in items:
+            box = np.array([[10, cy], [10, cy + 20], [200, cy + 20], [200, cy]],
+                           dtype=np.float32)
+            out.append({"text": txt, "cx": 100, "cy": cy, "box": box,
+                        "score": 0.9})
+        return out
+
+    def test_overlap_screens_dedup(self):
+        """同一条消息出现在相邻两屏（滚动重叠）→ 只留一条。"""
+        import numpy as np
+        c = self._composer()
+        img = np.zeros((400, 500, 3), dtype=np.uint8)
+        c.add_screen(1, self._texts([("早上好", 100)]), [], [], img,
+                     __import__("pathlib").Path(__import__("tempfile").mkdtemp()))
+        c.add_screen(2, self._texts([("早上好", 120)]), [], [], img,
+                     __import__("pathlib").Path(__import__("tempfile").mkdtemp()))
+        texts = [m.text for m in c.messages if m.kind == "text"]
+        self.assertEqual(texts, ["早上好"])
+
+    def test_repeated_text_far_apart_kept(self):
+        """群里多人隔了很多屏再发同文本（如'收到'）→ 各自保留。"""
+        import numpy as np
+        import tempfile
+        from pathlib import Path
+        c = self._composer()
+        img = np.zeros((400, 500, 3), dtype=np.uint8)
+        d = Path(tempfile.mkdtemp())
+        c.add_screen(1, self._texts([("收到", 100)]), [], [], img, d)
+        c.add_screen(2, self._texts([("别的消息", 110)]), [], [], img, d)
+        c.add_screen(9, self._texts([("收到", 100)]), [], [], img, d)
+        texts = [m.text for m in c.messages if m.kind == "text"]
+        self.assertEqual(texts.count("收到"), 2)
+
+    def test_same_screen_identical_texts_kept(self):
+        """同一屏两条相同文本（两人同回'1'）→ 都保留。"""
+        import numpy as np
+        import tempfile
+        from pathlib import Path
+        c = self._composer()
+        img = np.zeros((400, 500, 3), dtype=np.uint8)
+        c.add_screen(1, self._texts([("1", 100), ("1", 300)]), [], [], img,
+                     Path(tempfile.mkdtemp()))
+        texts = [m.text for m in c.messages if m.kind == "text"]
+        self.assertEqual(texts, ["1", "1"])
+
+
+class TestAtListTop(unittest.TestCase):
+    @staticmethod
+    def ocr(text, cy, cx=100):
+        return {"text": text, "cx": cx, "cy": cy, "score": 0.9}
+
+    def test_true_top(self):
+        """真顶部：搜索框 y4 + 首条会话名 y47（间距 43）。"""
+        texts = [self.ocr("搜系", 4), self.ocr("赵嫣嫣AI事务所", 47),
+                 self.ocr("22:07", 47, cx=220), self.ocr("黄春健", 112)]
+        self.assertTrue(at_list_top(texts))
+
+    def test_bottom_with_floating_header(self):
+        """列表底部滚动后露出的悬浮搜索头：下方 100px+ 空白 → 不是顶。"""
+        texts = [self.ocr("搜索", 5), self.ocr("鱼儿他江志红", 121),
+                 self.ocr("07/21", 141, cx=218)]
+        self.assertFalse(at_list_top(texts))
+
+    def test_no_anchor(self):
+        self.assertFalse(at_list_top([self.ocr("赵嫣嫣AI事务所", 47)]))
+        self.assertFalse(at_list_top([]))
+
+    def test_anchor_low_in_view(self):
+        """锚点不在顶部条带（cy≥15，如截图中部的'搜索'预览）→ 不是顶。"""
+        self.assertFalse(at_list_top([self.ocr("搜索", 200),
+                                      self.ocr("某会话", 240)]))
+
+    def test_anchor_with_icon_prefix(self):
+        """真顶实测：放大镜图标被混读成前缀字「以搜索」→ 仍应判定为顶。"""
+        texts = [self.ocr("以搜索", 5), self.ocr("黄藏寺项目值班值守", 48)]
+        self.assertTrue(at_list_top(texts))
+        texts2 = [self.ocr("以搜系", 4), self.ocr("某会话", 47)]
+        self.assertTrue(at_list_top(texts2))
+
+
+class TestScaledScanRounds(unittest.TestCase):
+    def test_unknown_uses_base(self):
+        self.assertEqual(scaled_scan_rounds(0), 60)
+        self.assertEqual(scaled_scan_rounds(-5), 60)
+
+    def test_scales_with_list_size(self):
+        # 242 项 ≈ 15,700px；悲观 110px/轮 ×1.2 + 8 ≈ 179
+        self.assertEqual(scaled_scan_rounds(242), 179)
+        # 大列表至少覆盖全列表（悲观位移），且被 300 封顶
+        self.assertGreaterEqual(scaled_scan_rounds(500), 500 * 65 // 150)
+        self.assertLessEqual(scaled_scan_rounds(10000), 300)
+        # 小列表不低于 base
+        self.assertEqual(scaled_scan_rounds(10), 60)
+
+
+class TestWindowContains(unittest.TestCase):
+    """截断名包容匹配：列表截断 + 标题 OCR 单字翻转也能验证通过。"""
+
+    def test_truncated_with_ocr_flip(self):
+        """实测案例：列表截断「优视光近视」/ 标题「尤视光近视防控护眼灯郑将军」。"""
+        self.assertTrue(window_contains("优视光近视", "尤视光近视防控护眼灯郑将军"))
+
+    def test_exact_prefix_contained(self):
+        self.assertTrue(window_contains("HZS对下支付管理", "HZS对下支付管理专班"))
+
+    def test_short_target_rejected(self):
+        """<4 字目标不做滑窗（防短名在长名里随机撞中）。"""
+        self.assertFalse(window_contains("李四", "王李四丰工程部通知群"))
+        self.assertFalse(window_contains("黄春健", "黄春健的项目群里还有别人"))
+
+    def test_unrelated_long_name_rejected(self):
+        """无关长名里碰巧含 2 个同字也不中（ratio 不达 0.8）。"""
+        self.assertFalse(window_contains("黄春健同志", "项目组通知：黄建国 健全制度"))
+
+
+class TestMergeRoundNames(unittest.TestCase):
+    """枚举并入：变体重现不算新增 + 更长读数原位替换（到底检测不被刷屏干扰）。"""
+
+    def _run(self, names, seen, found, prev):
+        return merge_round_names(names, set(seen), found, prev)
+
+    def test_variant_reread_not_genuine(self):
+        """底部重扫变体（赵A事务所 ↔ 赵嫣嫣AI事务所）→ 不计新增。"""
+        names = ["赵嫣嫣AI事务所"]
+        seen = set(names)
+        # 同一屏重叠（prev_screen）先滤；簇内变体（换了读法）也滤
+        g = self._run(names, seen, ["赵A事务所"], prev=["黄春健"])
+        self.assertEqual(g, 0)
+        self.assertEqual(names, ["赵嫣嫣AI事务所"])
+
+    def test_longer_reading_replaces(self):
+        """先见坏读数、后见长读数 → 原位替换为长读数。"""
+        names = ["赵A事务所"]
+        seen = set(names)
+        g = self._run(names, seen, ["赵嫣嫣AI事务所"], prev=["黄春健"])
+        self.assertEqual(g, 0)
+        self.assertEqual(names, ["赵嫣嫣AI事务所"])
+
+    def test_genuine_new_counted(self):
+        names = ["黄春健"]
+        seen = set(names)
+        g = self._run(names, seen, ["李四丰", "大有咨询王博"], prev=["黄春健"])
+        self.assertEqual(g, 2)
+        self.assertEqual(names, ["黄春健", "李四丰", "大有咨询王博"])
+
+    def test_overlap_prev_screen_ignored(self):
+        """相邻屏滚动重叠（同名单重复出现）→ 不新增。"""
+        names = ["黄春健"]
+        seen = set(names)
+        g = self._run(names, seen, ["黄春健", "李四丰"], prev=["黄春健", "李四丰"])
+        self.assertEqual(g, 0)
+
+    def test_old_variant_outside_window_is_new(self):
+        """窗口（16 名）之外的相似名 → 保守计为新增（不误合并深处真会话）。"""
+        names = ["张三丰"] + [f"占位{i}" for i in range(16)]
+        seen = set(names)
+        g = self._run(names, seen, ["张三丰同志"], prev=["占位15"])
+        self.assertEqual(g, 1)
+
+
+class TestDedupeNames(unittest.TestCase):
+    def test_longest_representative_kept(self):
+        """短变体先见、完整名后见 → 保留完整名（顺序无关）。"""
+        out = dedupe_names(["赵A事务所", "黄春健", "赵嫣嫣AI事务所"])
+        self.assertEqual(out, ["赵嫣嫣AI事务所", "黄春健"])
+
+    def test_no_overmerge_distinct(self):
+        out = dedupe_names(["黄春健", "黄春雅", "大有咨询王博"])
+        self.assertEqual(out, ["黄春健", "黄春雅", "大有咨询王博"])
+
+
+class TestNavClickSessionWhitelist(unittest.TestCase):
+    """护栏会话列白名单：列表底缘的项（y > 55% 线）可点，禁区仍硬拦。"""
+
+    # 实测布局：窗口 (0,0,940,743)，会话列表 (66,78,248,457) → 底缘 535
+    WIN = (0, 0, 940, 743)
+    LIST = (66, 78, 248, 457)
+
+    def _guard(self):
+        return SafetyGuard(input_zone_ratio=0.80)
+
+    def test_list_bottom_item_allowed(self):
+        """列表底缘项（y=522 > nav_bottom=409，仍在列表内）→ 放行。"""
+        self._guard().check_nav_click(186, 522, self.WIN, session_rect=self.LIST)
+
+    def test_below_list_rejected(self):
+        """列表矩形之下（y=560，仍在输入禁区上）→ 拒。"""
+        with self.assertRaises(ReadOnlyViolation):
+            self._guard().check_nav_click(186, 560, self.WIN,
+                                          session_rect=self.LIST)
+
+    def test_outside_list_x_rejected(self):
+        """列表列之外（聊天面板 x=500，y 超 55% 线）→ 拒。"""
+        with self.assertRaises(ReadOnlyViolation):
+            self._guard().check_nav_click(500, 500, self.WIN,
+                                          session_rect=self.LIST)
+
+    def test_window_bounds_still_hard(self):
+        """会话列白名单只豁免输入禁区（那是聊天面板的概念），
+        微信窗口范围校验仍然硬拦（伪列表矩形超出窗口无效）。"""
+        g = self._guard()
+        tall_list = (66, 78, 248, 900)   # 高度超出窗口底缘
+        with self.assertRaises(ReadOnlyViolation):
+            g.check_nav_click(186, 800, self.WIN, session_rect=tall_list)
+
+    def test_no_session_rect_keeps_old_rule(self):
+        """不传 session_rect：旧 55% 规则照旧生效。"""
+        with self.assertRaises(ReadOnlyViolation):
+            self._guard().check_nav_click(186, 522, self.WIN)
+
+
+class TestFoldedGroupSkipped(unittest.TestCase):
+    def test_pseudo_sessions_in_skip_list(self):
+        """折叠群聊/订阅号伪会话项在默认跳过表中。"""
+        for name in ("群聊", "折叠的群聊", "折叠的订阅号"):
+            self.assertIn(name, DEFAULT_SKIP)
+
+
+class TestStampOlderThan(unittest.TestCase):
+    """列表时间戳窗判定：True=明确早于窗起点（可跳），None=无法判定（保守保留）。"""
+
+    def _cutoff(self):
+        from datetime import date
+        return date(2025, 9, 4)          # 365d 窗，today=2026-09-04
+
+    def test_year_stamp_variants_old(self):
+        from wcr.extractor.session_enum import stamp_older_than
+        c = self._cutoff()
+        for st in ("2024/07/23", "2024/10", "2024", "2024/7/5", "2024-06-30"):
+            self.assertIs(stamp_older_than(st, c), True, st)
+
+    def test_ocr_mangled_stamps(self):
+        """实测乱读 '2U24/U9/2U'（=2024/09/20）、'2024/0//U2' → 归一后判旧。"""
+        from wcr.extractor.session_enum import stamp_older_than
+        c = self._cutoff()
+        self.assertIs(stamp_older_than("2U24/U9/2U", c), True)
+        self.assertIs(stamp_older_than("2O24/1O/05", c), True)
+
+    def test_mangled_stamp_captured(self):
+        """右列乱读戳也能被 _row_stamp 捕获（采集侧不丢）。"""
+        from wcr.extractor.session_enum import cluster_sessions
+        texts = [ocr_item("刘宇峰", 120, 90), ocr_item("2U24/U9/2U", 220, 90)]
+        out = cluster_sessions(texts, list_width=248, with_stamp=True)
+        self.assertEqual(out, [("刘宇峰", 90, "2U24/U9/2U")])
+
+    def test_dim_stamp_via_lowfloor_blocks(self):
+        """淡灰戳（score 0.33，低于名称阈值 0.4）经 stamp_texts 低阈值
+        全集捕获——分级阈值一次推理两用。"""
+        from wcr.extractor.session_enum import cluster_sessions
+        name = {"text": "刘宇峰", "cx": 120, "cy": 90, "score": 0.9}
+        dim_stamp = {"text": "2024/06/30", "cx": 220, "cy": 91, "score": 0.33}
+        out = cluster_sessions([name], list_width=248, with_stamp=True,
+                               stamp_texts=[name, dim_stamp])
+        self.assertEqual(out, [("刘宇峰", 90, "2024/06/30")])
+
+    def test_in_window_not_old(self):
+        from wcr.extractor.session_enum import stamp_older_than
+        c = self._cutoff()
+        for st in ("2026/09/01", "2025/10/03", "2025/09/05"):
+            self.assertIs(stamp_older_than(st, c), False, st)
+
+    def test_unjudgeable_kept(self):
+        """无年份形式（昨天/21:36/8-29）与坏读数 → None 保守保留。"""
+        from wcr.extractor.session_enum import stamp_older_than
+        c = self._cutoff()
+        for st in ("", "昨天", "21:36", "8-29", "U4/U/ 1", "2025", "星期三"):
+            self.assertIs(stamp_older_than(st, c), None, st)
+
+    def test_bad_month_falls_back(self):
+        """坏月份（2024/13）逐级回退到年 → 仍判旧。"""
+        from wcr.extractor.session_enum import stamp_older_than
+        self.assertIs(stamp_older_than("2024/13/99", self._cutoff()), True)
+
+
+class TestClusterSessionsStamp(unittest.TestCase):
+    def test_right_column_stamp(self):
+        """右列年份戳被采集为第三元组；名称保持剥离。"""
+        from wcr.extractor.session_enum import cluster_sessions
+        texts = [ocr_item("大有咨询王博", 120, 90),
+                 ocr_item("2024/9", 220, 90),
+                 ocr_item("收到", 110, 112)]
+        out = cluster_sessions(texts, list_width=248, with_stamp=True)
+        self.assertEqual(out, [("大有咨询王博", 90, "2024/9")])
+
+    def test_fused_year_as_stamp(self):
+        """右列戳丢失时用粘连年份兜底。"""
+        from wcr.extractor.session_enum import cluster_sessions
+        texts = [ocr_item("钧棋13674969...2024/10", 120, 90)]
+        out = cluster_sessions(texts, list_width=248, with_stamp=True)
+        self.assertEqual(out, [("钧棋13674969", 90, "2024/10")])
+
+    def test_no_stamp_empty(self):
+        from wcr.extractor.session_enum import cluster_sessions
+        texts = [ocr_item("黄春健", 120, 190), ocr_item("21:36", 222, 190)]
+        out = cluster_sessions(texts, list_width=248, with_stamp=True)
+        self.assertEqual(out, [("黄春健", 190, "21:36")])
+
+    def test_default_two_tuple_unchanged(self):
+        """默认仍返回二元组（既有调用/测试契约不破）。"""
+        from wcr.extractor.session_enum import cluster_sessions
+        out = cluster_sessions([ocr_item("黄春健", 120, 190)], list_width=248)
+        self.assertEqual(out, [("黄春健", 190)])
+
+
+class TestTranscriptDocx(unittest.TestCase):
+    def _chat(self):
+        msgs = [
+            Message(kind="text", text="早上好，今天到现场吗", side="left",
+                    speaker="黄春健", timestamp=datetime(2026, 8, 20, 8, 30)),
+            Message(kind="text", text="收到，马上出发", side="right",
+                    timestamp=datetime(2026, 8, 20, 8, 31)),
+            Message(kind="voice", text="12\"", side="left",
+                    timestamp=datetime(2026, 8, 20, 9, 0)),
+            Message(kind="text", text="进度照片已发", side="right",
+                    speaker="", timestamp=datetime(2026, 8, 21, 14, 5)),
+        ]
+        return Chat(name="黄春健", messages=msgs,
+                    captured_at="2026-08-27 23:00:00", time_window="365d")
+
+    def test_build_docx(self):
+        chat = self._chat()
+        out = Path(tempfile.mkdtemp()) / "黄春健_聊天记录_测试.docx"
+        build_transcript_docx(chat, out, time_window="365d")
+        self.assertTrue(out.exists())
+        doc = Document(str(out))
+        paras = [p.text for p in doc.paragraphs]
+        joined = "\n".join(paras)
+        # 标题与 meta
+        self.assertIn("黄春健 · 聊天记录", joined)
+        # 日期分隔
+        self.assertIn("■ 2026年08月20日", joined)
+        self.assertIn("■ 2026年08月21日", joined)
+        # 说话人 + 内容 + 时间
+        self.assertIn("【黄春健】 早上好，今天到现场吗　08:30", joined)
+        self.assertIn("【我】 收到，马上出发　08:31", joined)
+        # 语音标记
+        self.assertIn("〔语音 12\"〕", joined)
+        # 无名左侧消息不显示说话人前缀
+        self.assertIn("进度照片已发　14:05", joined)
+        # 只统计：文字 3 / 图片 0 / 语音 1
+        self.assertIn("文字 3 条 / 图片 0 张 / 语音 1 条", joined)
+
+    def test_image_message_without_file(self):
+        """图片消息但文件不存在 → 不嵌入也不崩。"""
+        msgs = [Message(kind="image", img_path="Z:/不存在/x.png", side="left",
+                        timestamp=datetime(2026, 8, 20, 10, 0))]
+        chat = Chat(name="测试群", messages=msgs, captured_at="", time_window="")
+        out = Path(tempfile.mkdtemp()) / "t.docx"
+        build_transcript_docx(chat, out)
+        self.assertTrue(out.exists())
+
+
+class TestImageOcrNote(unittest.TestCase):
+    """HZSMemo 图片OCR附注：图内文字（截图通知/报表）入档可检索。"""
+
+    def test_has_meaningful_rules(self):
+        from wcr.report.transcript_docx import _has_meaningful
+        self.assertTrue(_has_meaningful("视频接入测试"))
+        self.assertTrue(_has_meaningful("2026-09-01"))
+        self.assertTrue(_has_meaningful("chat"))      # 字母数字 ≥4 位
+        self.assertFalse(_has_meaningful("PDF"))      # 仅 3 位（HZSMemo 判据 ≥4）
+        self.assertFalse(_has_meaningful("中"))
+        self.assertFalse(_has_meaningful("12"))
+        self.assertFalse(_has_meaningful(""))
+
+    def test_note_rendered_below_image(self):
+        """_ocr_image_notes 命中时 → docx 出现「图内文字：」附注段。"""
+        import wcr.report.transcript_docx as td
+        d = Path(tempfile.mkdtemp())
+        # 1x1 占位图（真实嵌入无所谓，附注渲染被 monkeypatch 接管）
+        import cv2
+        import numpy as np
+        png = d / "img1.png"
+        cv2.imwrite(str(png), np.full((60, 60, 3), 255, dtype=np.uint8))
+        orig = td._ocr_image_notes
+        td._ocr_image_notes = lambda p, max_lines=10: ["会议时间：2026年9月1日", "地点：黄藏寺"]
+        try:
+            msgs = [Message(kind="image", img_path=str(png), side="left",
+                            timestamp=datetime(2026, 8, 20, 10, 0))]
+            chat = Chat(name="测试群", messages=msgs, captured_at="", time_window="")
+            out = d / "t.docx"
+            build_transcript_docx(chat, out)
+            doc = Document(str(out))
+            joined = "\n".join(p.text for p in doc.paragraphs)
+            self.assertIn("图内文字：", joined)
+            self.assertIn("会议时间：2026年9月1日", joined)
+        finally:
+            td._ocr_image_notes = orig
+
+    def test_real_ocr_on_rendered_text(self):
+        """端到端：PIL 渲染中文→PNG→_ocr_image_notes 4x放大识别。"""
+        import numpy as np
+        from PIL import Image, ImageDraw, ImageFont
+        from wcr.report.transcript_docx import _ocr_image_notes
+        d = Path(tempfile.mkdtemp())
+        png = d / "real.png"
+        img = Image.new("RGB", (280, 80), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 28)
+        draw.text((10, 20), "视频接入验收通知", font=font, fill=(0, 0, 0))
+        img.save(str(png))
+        notes = _ocr_image_notes(str(png))
+        self.assertTrue(any("验收" in n or "通知" in n or "接入" in n for n in notes),
+                        f"OCR 未识别: {notes}")
+
+
+if __name__ == "__main__":
+    unittest.main()

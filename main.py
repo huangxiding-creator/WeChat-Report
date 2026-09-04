@@ -33,6 +33,10 @@ def main():
     parser.add_argument("--title", default="", help="报告标题（空=自动）")
     parser.add_argument("--json", action="append", default=[],
                         help="离线 JSON 数据源（可多次指定；用于回放/测试）")
+    parser.add_argument("--all", action="store_true",
+                        help="批量模式：枚举全部会话，每个聊天导出一份聊天记录 word")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="批量模式试点：只处理前 N 个聊天（0=全部）")
     parser.add_argument("--output", default="", help="输出目录（默认 ./output）")
     parser.add_argument("--gen-example-config", action="store_true",
                         help="生成 config.example.ini 后退出")
@@ -52,6 +56,17 @@ def main():
         p = cfg.write_example()
         print(f"已生成：{p}")
         return 0
+
+    if args.all:
+        # 批量模式：所有会话 → 每聊天一个独立聊天记录 word（无 AI）
+        if not args.cli:
+            print("批量模式需要 --cli（会长时间占用鼠标，请勿操作电脑）")
+            return 1
+        from wcr.batch import BatchExporter
+        out_dir = Path(args.output) if args.output else cfg.output_dir / "批量导出"
+        res = BatchExporter(cfg, on_progress=print).run(
+            out_dir, time_window=args.window or "365d", limit=args.limit)
+        return 0 if res.failed == 0 else 1
 
     if args.cli:
         spec = ReportSpec(

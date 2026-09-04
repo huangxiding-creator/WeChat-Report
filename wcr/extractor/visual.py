@@ -38,6 +38,7 @@ class VisualExtractor(BaseExtractor):
                  scroll_attempts: int = 800,
                  stable_frames: int = 3,
                  scrollup_time_budget: int = 300,
+                 scrollup_mode: str = "probe",   # probe=探测时间标签; top=滚到顶(快)
                  max_screens: int = 3000,
                  ocr_threshold: float = 0.5,
                  speaker_attribution: bool = True,
@@ -57,6 +58,7 @@ class VisualExtractor(BaseExtractor):
         self.scroll_attempts = scroll_attempts
         self.stable_frames = stable_frames
         self.scrollup_time_budget = scrollup_time_budget
+        self.scrollup_mode = scrollup_mode
         self.max_screens = max_screens
         self.ocr_threshold = ocr_threshold
         self.speaker_attribution = speaker_attribution
@@ -69,7 +71,8 @@ class VisualExtractor(BaseExtractor):
 
     # ------------------------------------------------------------ entry
     def extract(self, chat_name: str, time_window: str = "",
-                on_progress: Optional[Callable[[str], None]] = None) -> Chat:
+                on_progress: Optional[Callable[[str], None]] = None,
+                already_open: bool = False) -> Chat:
         say = on_progress or (lambda m: log.info(m))
         start_dt, end_dt = parse_window(time_window)
         say(f"📂 目标聊天：「{chat_name}」 时间窗：{time_window or '全量'}")
@@ -84,10 +87,12 @@ class VisualExtractor(BaseExtractor):
         chat_rect = win.chat_area_rect(self.guard.input_zone_ratio)
         say(f"   聊天采集区：{chat_rect}")
 
-        # 3. 导航（自动尝试会话列表 + 打开验证，失败回落手动）
+        # 3. 导航（批量模式由 BatchExporter 先 open_chat，跳过）
         nav = WeChatNavigator(win, self.guard, self.settle_wait,
                               self.guard.input_zone_ratio)
-        if self.navigate_mode == "manual":
+        if already_open:
+            pass
+        elif self.navigate_mode == "manual":
             nav.manual(chat_name, self.manual_countdown, say)
         else:
             if not nav.by_session_list(chat_name, say):
@@ -116,7 +121,12 @@ class VisualExtractor(BaseExtractor):
 
         # 5. 向上滚动（时间窗模式：逐屏探测，见到早于 start 的标签即停）
         if not resumed:
-            self._scroll_up_with_window(scroller, cap, ocr, start_dt, say)
+            if self.scrollup_mode == "top":
+                # 批量/全量导出：直接滚到本地缓存顶（最快），一年窗靠事后过滤
+                say("⏫ 滚动到聊天顶部（本地缓存顶）…")
+                scroller.scroll_to_top()
+            else:
+                self._scroll_up_with_window(scroller, cap, ocr, start_dt, say)
 
         # 6. 向下逐屏采集
         time_labels_by_screen: dict[int, list[dict]] = {}
@@ -169,6 +179,11 @@ class VisualExtractor(BaseExtractor):
         # 7. 收尾：时间回填 + 排序 + 过滤 + 持久化
         composer.assign_times(time_labels_by_screen)
         messages = composer.sort()
+        # 实际覆盖区间：按过滤前的全部时间戳算（窗口外全部滤掉时仍能看到
+        # 该聊天缓存的真实时间范围，如 "2024-10-12 ~ 2024-10-24"）
+        all_ts = [m.timestamp for m in messages if m.timestamp]
+        coverage = (f"{min(all_ts):%Y-%m-%d} ~ {max(all_ts):%Y-%m-%d}"
+                    if all_ts else "")
         if start_dt or end_dt:
             n0 = len(messages)
             messages = [m for m in messages
@@ -181,6 +196,7 @@ class VisualExtractor(BaseExtractor):
                     messages=messages,
                     captured_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     time_window=time_window or "全量")
+        chat.coverage = coverage
         for m in chat.messages:
             m.chat_name = chat_name
 

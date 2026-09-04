@@ -68,7 +68,17 @@ class ChatScroller:
             if ScreenCapture.frames_equal(prev, curr):
                 stable += 1
                 if stable >= self.stable_frames_to_stop:
-                    log.info("已到顶部（连续 %d 次无变化，共滚动 %d 次）", stable, i + 1)
+                    # 懒加载双确认：微信上滚会异步拉取更早消息（0.5~2s 网络延迟），
+                    # 短间隔稳定可能是"加载中"假稳定 → 再等久些多滚一次，
+                    # 画面仍无变化才算真到顶，否则继续（保证覆盖尽可能早的历史）
+                    time.sleep(1.2)
+                    self._wheel(self.scroll_step * 8)
+                    time.sleep(0.6)
+                    if not ScreenCapture.frames_equal(curr, self._grab()):
+                        stable = 0
+                        continue
+                    log.info("已到顶部（连续 %d 次无变化 + 懒加载双确认，共滚动 %d 次）",
+                             stable, i + 1)
                     return i + 1
             else:
                 stable = 0

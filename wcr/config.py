@@ -47,6 +47,7 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "scroll_pause": "0.35",
         "stable_frames_to_stop": "3",
         "scrollup_time_budget": "300",
+        "scrollup_mode": "probe",
         "scroll_step": "15",
         "capture_overlap": "80",
         # 屏数安全上限
@@ -109,6 +110,14 @@ DEFAULTS: dict[str, dict[str, str]] = {
         # 里程碑通知：start/extract/analyze/report/done/all
         "milestones": "start,extract,analyze,report,done",
         "send_report_file": "true",
+    },
+    # ------- 批量导出（--all 模式：所有聊天各一个聊天记录 word） -------
+    "batch": {
+        # 跳过的系统/工具会话（非私聊/群聊）
+        "skip_names": "微信团队,订阅号消息,文件传输助手,腾讯文档,微信支付,微信豆包",
+        "enum_rounds": "260",         # 会话列表枚举滚动轮数上限（实测 400+ 项长列表，~2.4 名/轮）
+        "max_images_embed": "50",     # 每个聊天记录 docx 最多嵌入图片数
+        "report_every": "5",          # 每完成 N 个聊天企业微信汇报一次
     },
     # ------- 只读安全（硬约束，一般不动） -------
     "safety": {

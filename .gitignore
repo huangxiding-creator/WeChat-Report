@@ -11,7 +11,12 @@ checkpoints/
 # 本机诊断脚本与截图（不入库）
 _probe_*.py
 _probe_*.png
+_verify_*.py
+_probe*_result*.txt
+_probe_full_list.txt
+_probe_top9.txt
 _e2e_*.log
+_batch_*.log
 _report_dump.txt
 
 # 内部工作文档（不对外发布）

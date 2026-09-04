@@ -43,11 +43,26 @@ class MessageComposer:
     """跨屏去重、按时间标签分组排序；支持 checkpoint 序列化以断点续采。"""
 
     def __init__(self, speaker_attribution: bool = True):
-        self.seen: set[str] = set()
+        # 窗口化去重表：(指纹, 屏内同文序号) → 最近出现的屏号。
+        # 全局集合会把"历史上多次出现的同文本"（如群里多人回'收到'/'1'）
+        # 错误折叠成一条 —— 重叠屏去重只需 3 屏窗口（滚动步长 75% 视口，
+        # 一条消息最多横跨 2~3 屏），窗口外同文应重新接纳。
+        self.seen: dict[tuple[str, int], int] = {}
         self.messages: list[Message] = []
         self.last_parsed_time: Optional[datetime] = None
         self.speaker_attribution = speaker_attribution
         self.screen_count = 0
+
+    # ------------------------------------------------------------ dedup
+    DEDUP_WINDOW = 3   # 屏；相邻屏重叠去重窗口
+
+    def _accept(self, fp: str, rank: int, screen_idx: int) -> bool:
+        """同指纹在窗口内出现 → 去重；窗口外（间隔 ≥3 屏）→ 重新接纳。"""
+        key = (fp, rank)
+        last = self.seen.get(key)
+        ok = last is None or screen_idx - last >= self.DEDUP_WINDOW
+        self.seen[key] = screen_idx
+        return ok
 
     # ------------------------------------------------------------ add screen
     def add_screen(self, screen_idx: int,
@@ -68,14 +83,17 @@ class MessageComposer:
         w = img_width or img_bgr.shape[1]
         mid_x = w // 2
 
-        # 文本消息（按 y 自上而下）
+        # 文本消息（按 y 自上而下；同屏同文的第 N 次出现用 rank 区分，
+        # 跨屏去重由 _accept 的窗口判定）
+        text_rank: dict[str, int] = {}
         for t in sorted(ocr_texts, key=lambda t: t["cy"]):
             fp = text_fingerprint(t["text"])
-            if fp in self.seen:
+            rank = text_rank.get(fp, 0)
+            text_rank[fp] = rank + 1
+            if not self._accept(fp, rank, screen_idx):
                 continue
             if _NOISE_RE.match(t["text"]):
                 continue
-            self.seen.add(fp)
             box = (int(t["box"][:, 0].min()), int(t["box"][:, 1].min()),
                    int(t["box"][:, 0].max()), int(t["box"][:, 1].max()))
             msg = Message(
@@ -90,14 +108,16 @@ class MessageComposer:
             self.messages.append(msg)
             added += 1
 
-        # 图片消息（裁剪 → dHash 指纹 → 去重 → 落盘）
+        # 图片消息（裁剪 → dHash 指纹 → 窗口去重 → 落盘）
+        img_rank: dict[str, int] = {}
         for i, rect in enumerate(image_rects):
             x, y, rw, rh = rect
             crop = img_bgr[y:y + rh, x:x + rw]
             fp = image_fingerprint(crop)
-            if fp in self.seen:
+            rank = img_rank.get(fp, 0)
+            img_rank[fp] = rank + 1
+            if not self._accept(fp, rank, screen_idx):
                 continue
-            self.seen.add(fp)
             img_path = screenshot_dir / f"screen{screen_idx:04d}_img{i:02d}.png"
             imwrite_png(img_path, crop)
             msg = Message(
@@ -108,12 +128,15 @@ class MessageComposer:
             self.messages.append(msg)
             added += 1
 
-        # 语音标记（OCR 读到的 "12''"）
+        # 语音标记（OCR 读到的 "12''"；指纹只含时长文本——cy 是屏内坐标，
+        # 同一语音在相邻屏 cy 不同，掺入会破坏跨屏去重）
+        voice_rank: dict[str, int] = {}
         for v in voice_marks:
-            fp = "v|" + text_fingerprint(f"{v['text']}@{v['cy']}")
-            if fp in self.seen:
+            fp = "v|" + text_fingerprint(v["text"])
+            rank = voice_rank.get(fp, 0)
+            voice_rank[fp] = rank + 1
+            if not self._accept(fp, rank, screen_idx):
                 continue
-            self.seen.add(fp)
             self.messages.append(Message(
                 kind="voice", text=v["text"],
                 box=(int(v["box"][:, 0].min()), int(v["box"][:, 1].min()),
@@ -196,7 +219,7 @@ class MessageComposer:
     def save_checkpoint(self, path: Path) -> None:
         payload = {
             "screen_count": self.screen_count,
-            "seen": sorted(self.seen),
+            "seen": {f"{k[0]}|{k[1]}": v for k, v in self.seen.items()},
             "messages": [m.to_dict() for m in self.messages],
             "last_parsed_time": (self.last_parsed_time.strftime("%Y-%m-%d %H:%M:%S")
                                  if self.last_parsed_time else ""),
@@ -212,7 +235,15 @@ class MessageComposer:
         except (json.JSONDecodeError, OSError):
             return False
         self.screen_count = payload.get("screen_count", 0)
-        self.seen = set(payload.get("seen", []))
+        raw_seen = payload.get("seen", {})
+        self.seen = {}
+        if isinstance(raw_seen, dict):   # 新格式：{fp|rank: screen}
+            for k, scr in raw_seen.items():
+                fp, _, rank = str(k).rpartition("|")
+                try:
+                    self.seen[(fp, int(rank))] = int(scr)
+                except ValueError:
+                    continue
         self.messages = [Message.from_dict(d) for d in payload.get("messages", [])]
         if payload.get("last_parsed_time"):
             try:

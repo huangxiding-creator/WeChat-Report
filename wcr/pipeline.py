@@ -35,6 +35,34 @@ def _fmt_dt(dt) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "—"
 
 
+def make_visual_extractor(cfg: Config, output_dir: Path,
+                          scrollup_mode: str = "probe"):
+    """按 INI 配置构建视觉提取器（pipeline / batch 共用）。"""
+    from .extractor.visual import VisualExtractor
+    return VisualExtractor(
+        navigate_mode=cfg.get("extract", "navigate_mode", "auto"),
+        manual_countdown=cfg.get_int("extract", "manual_countdown", 10),
+        settle_wait=cfg.get_float("extract", "settle_wait", 1.5),
+        scroll_pause=cfg.get_float("extract", "scroll_pause", 0.35),
+        scroll_step=cfg.get_int("extract", "scroll_step", 15),
+        scroll_attempts=cfg.get_int("extract", "scroll_to_top_attempts", 800),
+        stable_frames=cfg.get_int("extract", "stable_frames_to_stop", 3),
+        scrollup_time_budget=cfg.get_int("extract", "scrollup_time_budget", 300),
+        scrollup_mode=scrollup_mode,
+        max_screens=cfg.get_int("extract", "max_screens", 3000),
+        ocr_threshold=cfg.get_float("ocr", "score_threshold", 0.5),
+        speaker_attribution=cfg.get_bool("ocr", "speaker_attribution", True),
+        checkpoint_enabled=cfg.get_bool("extract", "checkpoint_enabled", True),
+        keep_screenshots=cfg.get_bool("extract", "keep_screenshots", True),
+        output_dir=output_dir,
+        image_min_w=cfg.get_int("bubbles", "image_min_w", 90),
+        image_min_h=cfg.get_int("bubbles", "image_min_h", 90),
+        image_min_std=cfg.get_float("bubbles", "image_min_std", 20.0),
+        image_iou_merge=cfg.get_float("bubbles", "image_iou_merge", 0.3),
+        input_zone_ratio=cfg.get_float("safety", "input_zone_ratio", 0.80),
+    )
+
+
 def run(spec: ReportSpec, cfg: Config,
         on_progress: Optional[Callable[[str], None]] = None) -> RunResult:
     res = RunResult()

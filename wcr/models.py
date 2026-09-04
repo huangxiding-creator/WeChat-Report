@@ -57,6 +57,7 @@ class Chat:
     messages: list[Message] = field(default_factory=list)
     captured_at: str = ""
     time_window: str = ""
+    coverage: str = ""                    # 过滤前的实际覆盖区间（如 2024-10-12 ~ 2024-10-24）
 
     # 便捷视图
     @property
@@ -76,6 +77,7 @@ class Chat:
             "name": self.name,
             "captured_at": self.captured_at,
             "time_window": self.time_window,
+            "coverage": self.coverage,
             "messages": [m.to_dict() for m in self.messages],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +89,8 @@ class Chat:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         chat = cls(name=payload.get("name", ""),
                    captured_at=payload.get("captured_at", ""),
-                   time_window=payload.get("time_window", ""))
+                   time_window=payload.get("time_window", ""),
+                   coverage=payload.get("coverage", ""))
         chat.messages = [Message.from_dict(d) for d in payload.get("messages", [])]
         return chat
 
