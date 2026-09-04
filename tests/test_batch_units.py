@@ -698,5 +698,33 @@ class TestUiNoiseFilter(unittest.TestCase):
         self.assertIn("【刘浩】 收到", joined)
 
 
+class TestFailSafeStartGate(unittest.TestCase):
+    """启动门：角点静止的鼠标会秒杀第一个 pyautogui 动作（实测 36s 即死）。"""
+
+    def test_corner_predicate(self):
+        from wcr.batch import _at_failsafe_corner
+        pts = [(0, 0), (0, 1079), (1919, 0), (1919, 1079)]
+        for pos in pts:
+            self.assertTrue(_at_failsafe_corner(pos, pts), pos)
+        for pos in ((1, 0), (0, 1), (960, 540), (1918, 1079), (100, 100)):
+            self.assertFalse(_at_failsafe_corner(pos, pts), pos)
+
+    def test_waiter_returns_once_clear(self):
+        """鼠标一旦离开角点立即放行（不依赖真实鼠标位置）。"""
+        from unittest import mock
+        import wcr.batch as batch_mod
+
+        pts = [(0, 0)]
+        positions = iter([(0, 0), (0, 0), (500, 300)])
+        with mock.patch.object(batch_mod, "time") as fake_time, \
+                mock.patch("pyautogui.position",
+                           side_effect=lambda: next(positions)):
+            fake_time.monotonic.side_effect = iter(range(0, 100, 1))
+            fake_time.sleep.return_value = None
+            batch_mod._wait_mouse_off_corner(
+                lambda m: None, poll_s=0.01, remind_every_s=120.0)
+        self.assertEqual(fake_time.sleep.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

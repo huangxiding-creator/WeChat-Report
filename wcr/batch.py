@@ -56,6 +56,12 @@ class BatchExporter:
             for k in failed:
                 progress.pop(k)
 
+        # 启动门：鼠标停在屏幕角点时，pyautogui 任何动作都会立刻触发
+        # fail-safe（实测两次启动 36 秒/55 秒即死——用户把鼠标歇在角落）。
+        # 只等待移开，绝不代为移动；fail-safe 杀手锏本身保留（人工随时
+        # 可把鼠标甩到角落中止自动化）。
+        _wait_mouse_off_corner(self.say)
+
         from .pipeline import make_visual_extractor
         # probe 模式：上滚逐屏 OCR 探测，见到早于窗起点的标签即停；文本集
         # 连续稳定 = 到缓存顶（GIF 动图免疫）；900s 预算兜底。top 模式实测
@@ -245,6 +251,28 @@ class BatchExporter:
 def _safe(name: str) -> str:
     return "".join(c if (c.isalnum() or c in "-_一-龥") else "_"
                    for c in name).strip("_")[:60] or "chat"
+
+
+def _at_failsafe_corner(pos, points) -> bool:
+    """鼠标是否停在 pyautogui fail-safe 角点（判据与 pyautogui 一致：
+    恰在角点像素上，本机实测 [(0,0),(0,1079),(1919,0),(1919,1079)]）。"""
+    return tuple(pos) in {tuple(p) for p in points}
+
+
+def _wait_mouse_off_corner(say, poll_s: float = 3.0,
+                           remind_every_s: float = 120.0) -> None:
+    """等待鼠标离开屏幕四角（fail-safe 角点静止的鼠标会秒杀第一个动作）。"""
+    import pyautogui
+
+    points = list(pyautogui.FAILSAFE_POINTS)
+    t0 = time.monotonic()
+    last_remind = 0.0
+    while _at_failsafe_corner(pyautogui.position(), points):
+        el = time.monotonic() - t0
+        if el - last_remind >= remind_every_s:
+            say(f"🖱 鼠标停在屏幕角落（fail-safe 区），等待移开已 {el:.0f}s …")
+            last_remind = el
+        time.sleep(poll_s)
 
 
 def dedupe_names(names: list[str]) -> list[str]:
