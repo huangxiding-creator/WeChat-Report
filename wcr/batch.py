@@ -79,11 +79,18 @@ class BatchExporter:
             win, guard, on_progress=self.say,
             max_rounds=self.cfg.get_int("batch", "enum_rounds", 160))
         names = enumerator.enumerate(skip=skip_names)
-        # 采戳自诊断：戳字典大小 + 年份戳样本（预过滤覆盖率异常时定位用）
+        # 采戳自诊断：戳字典大小 + 年份戳样本（预过滤覆盖率异常时定位用）；
+        # 落盘供离线分析（快速滚动下老聊天 2024/* 淡灰戳漏采率高，需迭代）
         st_n = len(enumerator.stamps)
         st_year = sum(1 for v in enumerator.stamps.values()
                       if any(y in v for y in ("2024", "2025", "2026", "2O24", "2U24")))
         self.say(f"   采戳：{st_n} 名有时间戳（其中年份戳 {st_year}）")
+        try:
+            (out_dir / "_stamps.json").write_text(
+                json.dumps(enumerator.stamps, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+        except OSError:
+            pass
         deduped = dedupe_names(names)
         if len(deduped) != len(names):
             self.say(f"   枚举去重：{len(names)} → {len(deduped)}（OCR 变体合并）")
