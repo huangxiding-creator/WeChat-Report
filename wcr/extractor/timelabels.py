@@ -90,7 +90,10 @@ def parse_time_label(text: str, now: Optional[datetime] = None,
             return None
         # 未到今年该日期 → 可能是去年（跨年边界）
         if cand > now + timedelta(days=1):
-            cand = cand.replace(year=year - 1)
+            try:
+                cand = cand.replace(year=year - 1)
+            except ValueError:
+                return None   # 2月29日回退到非闰年
         return cand
 
     m = _WEEK.match(t) or _ZHOU.match(t)
@@ -100,19 +103,28 @@ def parse_time_label(text: str, now: Optional[datetime] = None,
         if delta == 0:
             delta = 7  # "星期二"显示时通常指过去的那天
         day = (now - timedelta(days=delta)).date()
-        return datetime(day.year, day.month, day.day,
-                        int(m["h"]), int(m["mi"]), int(m["s"] or 0))
+        try:
+            return datetime(day.year, day.month, day.day,
+                            int(m["h"]), int(m["mi"]), int(m["s"] or 0))
+        except ValueError:
+            return None   # 乱读时刻（如 24:15）按不可解析处理
 
     m = _YESTERDAY.match(t)
     if m:
         base = now - timedelta(days=(1 if t.startswith("昨天") else 2))
-        return base.replace(hour=int(m["h"]), minute=int(m["mi"]),
-                            second=int(m["s"] or 0), microsecond=0)
+        try:
+            return base.replace(hour=int(m["h"]), minute=int(m["mi"]),
+                                second=int(m["s"] or 0), microsecond=0)
+        except ValueError:
+            return None
 
     m = _CLOCK.match(t)
     if m:
-        cand = now.replace(hour=int(m["h"]), minute=int(m["mi"]),
-                           second=int(m["s"] or 0), microsecond=0)
+        try:
+            cand = now.replace(hour=int(m["h"]), minute=int(m["mi"]),
+                               second=int(m["s"] or 0), microsecond=0)
+        except ValueError:
+            return None   # 正则 \d{1,2} 挡不住 24:41/12:60（OCR 数字翻转）
         if last_seen:
             # 裸时刻出现在日期标签之后：归属该日期；若早得离谱则是跨午夜
             cand = cand.replace(year=last_seen.year, month=last_seen.month,

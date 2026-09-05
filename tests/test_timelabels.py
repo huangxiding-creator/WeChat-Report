@@ -37,6 +37,16 @@ class TestTimeLabel(unittest.TestCase):
         self.assertEqual(parse_time_label("2024年6月30日", NOW),
                          datetime(2024, 6, 30))
 
+    def test_absurd_clock_rejected(self):
+        """乱读时刻（正则 \d{1,2} 挡不住 24:41/12:60，OCR 数字翻转所致）→
+        返回 None 而非抛异常（实测 2026-09-06 赵A事务所上滚探测即死于此：
+        'hour must be in 0..23' 杀掉整个导出）。"""
+        self.assertIsNone(parse_time_label("24:41", NOW))
+        self.assertIsNone(parse_time_label("昨天 24:15", NOW))
+        self.assertIsNone(parse_time_label("星期二 25:00", NOW))
+        self.assertIsNone(parse_time_label("12:60", NOW))
+        self.assertIsNone(parse_time_label("99:99", NOW))
+
     def test_md_no_year(self):
         self.assertEqual(parse_time_label("3月16日", NOW),
                          datetime(2026, 3, 16))
