@@ -75,17 +75,21 @@ def _confirm_list_top(win, cap, ocr, guard: Optional[SafetyGuard] = None) -> boo
     连续 2 次上推集合不变才确认（快速连滚吞档风险下取双确认）。
     过顶态（2026-09-06 实测）：列表可越过锚点位继续上滑把搜索头整个
     折叠出视野——首行顶到区顶、锚点消失，确认永不成立、回顶空磨到
-    预算耗尽。处置：锚点不可见时小步**下退** 2 档再验——过顶态一退
-    即露出锚点（顺带自愈回锚点位），中段滚动退多少都不会出现锚点，
-    以此区分，不引入中段假阳性。
+    预算耗尽。处置：锚点不可见时**单档下退**逐档试探（最多 3 档，
+    每档后验锚点——2 档一步 74px 会跨过锚点 <15px 的可见窗）——
+    过顶态退 1~2 档即露出锚点（顺带自愈回锚点位），中段滚动退多少
+    都不会出现锚点，以此区分，不引入中段假阳性。
     """
     for _ in range(2):
         if not at_list_top(ocr.parse(cap.grab())):
             if guard is None:
                 return False   # 无护栏（单测桩）无法滚动验证
-            scroll_session_list(win, guard, -120, 2, pause=0.15)
-            time.sleep(0.4)
-            if not at_list_top(ocr.parse(cap.grab())):
+            for _step in range(3):
+                scroll_session_list(win, guard, -120, 1, pause=0.12)
+                time.sleep(0.3)
+                if at_list_top(ocr.parse(cap.grab())):
+                    break
+            else:
                 return False
         time.sleep(0.35)
     if guard is None:
@@ -101,11 +105,18 @@ def _confirm_list_top(win, cap, ocr, guard: Optional[SafetyGuard] = None) -> boo
         # 比较下部行集合 = 滚动 vs 重排 的区分判据。
         return tuple(n for n, _y in found[3:])
 
+    def _sig_close(a, b) -> bool:
+        """签名位移容忍比较：过顶态与锚点位只差 ~47px（~1 行），
+        索引切片窗会整体错一位；用集合重叠 ≥ min-2 判"未移动"
+        （中段滚动一挪 4~5 行，重叠骤降，仍能识破）。"""
+        sa, sb = set(a), set(b)
+        return len(sa & sb) >= min(len(sa), len(sb)) - 2
+
     base = _names_sig()
     for _ in range(2):
         scroll_session_list(win, guard, +120, 8, pause=0.1)
         time.sleep(0.5)
-        if _names_sig() != base:
+        if not _sig_close(_names_sig(), base):
             return False
     return True
 

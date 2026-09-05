@@ -291,18 +291,18 @@ class TestConfirmListTopOverTop(unittest.TestCase):
         return ok, scrolls
 
     def test_overtop_heals_and_confirms(self):
-        """过顶帧 → 下退露出锚点 → 双帧+上推验证全过 → 确认。"""
+        """过顶帧 → 单档下退露出锚点 → 双帧+上推验证全过 → 确认。"""
         script = [self.OVER_TOP] + [self.ANCHOR_TOP] * 5
         ok, scrolls = self._run(script)
         self.assertTrue(ok)
         self.assertEqual(scrolls[0][2], -120)   # 第一个滚动是过顶自愈下退
-        self.assertEqual(scrolls[0][3], 2)      # 小步 2 档
+        self.assertEqual(scrolls[0][3], 1)      # 单档步进（74px 会跨过锚点窗）
 
     def test_midlist_stays_rejected(self):
-        """中段帧：下退后仍无锚点 → 确认失败（不引入假阳性）。"""
+        """中段帧：3 档单步下退后仍无锚点 → 确认失败（不引入假阳性）。"""
         ok, scrolls = self._run([self.MID_LIST] * 4)
         self.assertFalse(ok)
-        self.assertEqual(scrolls[0][2], -120)
+        self.assertEqual([s[2] for s in scrolls], [-120, -120, -120])
 
 
 class TestScaledScanRounds(unittest.TestCase):
