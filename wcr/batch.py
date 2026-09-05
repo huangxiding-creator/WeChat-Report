@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -50,6 +52,21 @@ class BatchExporter:
             only: Optional[list[str]] = None) -> BatchResult:
         res = BatchResult()
         out_dir.mkdir(parents=True, exist_ok=True)
+        render_q = out_dir / "_render_queue"
+        render_q.mkdir(exist_ok=True)
+        # 渲染子进程的驱动心跳：随每条进度日志触碰（上滚每 60 轮必报一条，
+        # 大聊天 2.5h+ 期间也不会被误判驱动死亡而提前退出）
+        _hb = render_q / "_driver_alive"
+        _orig_say = self.say
+
+        def _say_hb(m: str) -> None:
+            try:
+                _hb.write_text("", encoding="utf-8")
+            except OSError:
+                pass
+            _orig_say(m)
+
+        self.say = _say_hb
         progress_path = out_dir / "_batch_progress.json"
         progress = self._load_progress(progress_path) if resume else {}
         if retry_failed:
@@ -129,83 +146,100 @@ class BatchExporter:
         self._notify(f"【WeChat-Report 批量导出】启动\n目标聊天：{res.total} 个"
                      f"\n范围：{scope}\n已完成（断点）：{len(progress)} 个")
 
-        # 2. 逐个导出
+        # 2. 逐个导出（docx 由渲染子进程并行生成——大文档实测 ~5 分钟，
+        #    不让微信空闲等它；微信侧滚轮/点击/停顿节奏零改动）
+        render_proc, render_log = _start_render_worker(render_q)
+        render_errs: list[Path] = []
         t0 = time.monotonic()
-        for i, name in enumerate(names, 1):
-            done_key = _progress_key(name, progress)
-            if done_key is not None:
-                res.skipped += 1
-                self.say(f"⏭ [{i}/{res.total}] 「{name}」已完成"
-                         f"（断点跳过：{done_key}）")
-                continue
-            self.say(f"\n───── [{i}/{res.total}] 「{name}」 ─────")
-            ok = False
-            last_err: Optional[Exception] = None
-            for attempt in (1, 2):
-                if attempt == 2:
-                    # fail-safe 人工碰角重试：等鼠标离开角落后原目标再试一次
-                    #（目标 1 实测：15 分钟上滚成果被一次碰角全部作废）。
-                    # 持续按住角落 = 人为停机，等待不打扰；杀进程仍可随时终止。
-                    if last_err is None or "fail-safe" not in str(last_err).lower():
+        try:
+            for i, name in enumerate(names, 1):
+                (render_q / "_driver_alive").write_text("", encoding="utf-8")
+                done_key = _progress_key(name, progress)
+                if done_key is not None:
+                    res.skipped += 1
+                    self.say(f"⏭ [{i}/{res.total}] 「{name}」已完成"
+                             f"（断点跳过：{done_key}）")
+                    continue
+                self.say(f"\n───── [{i}/{res.total}] 「{name}」 ─────")
+                ok = False
+                last_err: Optional[Exception] = None
+                for attempt in (1, 2):
+                    if attempt == 2:
+                        # fail-safe 人工碰角重试：等鼠标离开角落后原目标再试一次
+                        #（目标 1 实测：15 分钟上滚成果被一次碰角全部作废）。
+                        # 持续按住角落 = 人为停机，等待不打扰；杀进程仍可随时终止。
+                        if last_err is None or "fail-safe" not in str(last_err).lower():
+                            break
+                        self.say("   🖱 fail-safe（鼠标碰角）——等待鼠标离开角落后重试本聊天")
+                        _wait_mouse_off_corner(self.say)
+                    try:
+                        # 导航：滚动列表查找并打开（已有 open+verify 双重确认）
+                        nav = WeChatNavigator(win, guard,
+                                              settle_wait=self.cfg.get_float(
+                                                  "extract", "settle_wait", 1.5),
+                                              input_zone_ratio=guard.input_zone_ratio)
+                        # start_from_current：名单按列表顺序排列，从当前位置续扫省时；
+                        # expected_items：按列表总长放大扫描轮数（活跃账号 200+ 项）
+                        if not nav.open_chat(name, on_progress=self.say,
+                                             expected_items=n_all,
+                                             start_from_current=True):
+                            raise RuntimeError("会话列表中未找到（或点击验证失败）")
+                        # 采集（already_open：跳过 extract 内部导航；年份令牌下
+                        # capture_window="" → 全量深度到真顶）
+                        chat = ext.extract(name, capture_window, self.say,
+                                           already_open=True)
+                        # docx 渲染排队（子进程并行）：JSON 已在 extract 内落盘，
+                        # 进度即时可记（断点语义不变），docx 名预知供验收核对
+                        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        docx_path = out_dir / f"{_safe(name)}_聊天记录_{stamp}.docx"
+                        _enqueue_render_job(render_q, {
+                            "name": name,
+                            "json_path": str(out_dir / f"{_safe(name)}_messages.json"),
+                            "docx_path": str(docx_path),
+                            "time_window": capture_window,
+                            "max_images": max_images,
+                        })
+                        self.say(f"💾 「{name}」采集完成：{len(chat.messages)} 条，"
+                                 f"docx 后台渲染已排队")
+                        res.done += 1
+                        res.messages += len(chat.messages)
+                        res.docx_files.append(str(docx_path))
+                        progress[name] = {"messages": len(chat.messages),
+                                          "docx": str(docx_path),
+                                          "at": datetime.now().isoformat(timespec="seconds")}
+                        self._save_progress(progress_path, progress)
+                        if res.done % report_every == 0:
+                            el = int(time.monotonic() - t0)
+                            avg = el // max(res.done, 1)
+                            eta = avg * (res.total - i)
+                            self._notify(f"【批量导出进度】{i}/{res.total}\n"
+                                         f"已完成 {res.done} · 失败 {res.failed} · "
+                                         f"累计 {res.messages} 条\n"
+                                         f"平均 {avg}s/个 · 预计剩余 ≈ {eta // 60} 分钟")
+                        ok = True
                         break
-                    self.say("   🖱 fail-safe（鼠标碰角）——等待鼠标离开角落后重试本聊天")
-                    _wait_mouse_off_corner(self.say)
-                try:
-                    # 导航：滚动列表查找并打开（已有 open+verify 双重确认）
-                    nav = WeChatNavigator(win, guard,
-                                          settle_wait=self.cfg.get_float(
-                                              "extract", "settle_wait", 1.5),
-                                          input_zone_ratio=guard.input_zone_ratio)
-                    # start_from_current：名单按列表顺序排列，从当前位置续扫省时；
-                    # expected_items：按列表总长放大扫描轮数（活跃账号 200+ 项）
-                    if not nav.open_chat(name, on_progress=self.say,
-                                         expected_items=n_all,
-                                         start_from_current=True):
-                        raise RuntimeError("会话列表中未找到（或点击验证失败）")
-                    # 采集（already_open：跳过 extract 内部导航；年份令牌下
-                    # capture_window="" → 全量深度到真顶）
-                    chat = ext.extract(name, capture_window, self.say,
-                                       already_open=True)
-                    # 整理成独立 word（无 AI）
-                    from .report.transcript_docx import build_transcript_docx
-                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    docx_path = out_dir / f"{_safe(name)}_聊天记录_{stamp}.docx"
-                    build_transcript_docx(chat, docx_path,
-                                          time_window=capture_window,
-                                          max_images=max_images)
-                    kb = docx_path.stat().st_size / 1024
-                    self.say(f"💾 「{name}」完成：{len(chat.messages)} 条 → "
-                             f"{docx_path.name}（{kb:.0f} KB）")
-                    res.done += 1
-                    res.messages += len(chat.messages)
-                    res.docx_files.append(str(docx_path))
-                    progress[name] = {"messages": len(chat.messages),
-                                      "docx": str(docx_path),
+                    except Exception as e:
+                        last_err = e
+                if not ok:
+                    res.failed += 1
+                    res.errors[name] = str(last_err)[:200]
+                    self.say(f"   ✗ 「{name}」失败：{last_err}")
+                    log.warning("导出 %s 失败：%s", name, last_err, exc_info=True)
+                    # 失败也记录，避免断点重跑时反复撞墙
+                    progress[name] = {"error": str(last_err)[:200],
                                       "at": datetime.now().isoformat(timespec="seconds")}
                     self._save_progress(progress_path, progress)
-                    if res.done % report_every == 0:
-                        el = int(time.monotonic() - t0)
-                        avg = el // max(res.done, 1)
-                        eta = avg * (res.total - i)
-                        self._notify(f"【批量导出进度】{i}/{res.total}\n"
-                                     f"已完成 {res.done} · 失败 {res.failed} · "
-                                     f"累计 {res.messages} 条\n"
-                                     f"平均 {avg}s/个 · 预计剩余 ≈ {eta // 60} 分钟")
-                    ok = True
-                    break
-                except Exception as e:
-                    last_err = e
-            if not ok:
-                res.failed += 1
-                res.errors[name] = str(last_err)[:200]
-                self.say(f"   ✗ 「{name}」失败：{last_err}")
-                log.warning("导出 %s 失败：%s", name, last_err, exc_info=True)
-                # 失败也记录，避免断点重跑时反复撞墙
-                progress[name] = {"error": str(last_err)[:200],
-                                  "at": datetime.now().isoformat(timespec="seconds")}
-                self._save_progress(progress_path, progress)
-            # 每个聊天之间稍歇，降低微信渲染压力
-            time.sleep(0.5)
+                # 每个聊天之间稍歇，降低微信渲染压力
+                time.sleep(0.5)
+        finally:
+            # 渲染队列收尾：停机标记 → 等排空（末尾若干 docx 补完）
+            _drain_render_queue(render_q, render_proc, self.say)
+            render_errs = sorted(render_q.glob("*.err.json"))
+            if render_errs:
+                self.say(f"⚠ docx 渲染失败 {len(render_errs)} 个"
+                         f"（_render_queue/*.err.json，下次启动自动重试）")
+            if render_log:
+                render_log.close()
 
         # 3. 汇总
         el = int(time.monotonic() - t0)
@@ -214,7 +248,8 @@ class BatchExporter:
         self._notify(f"【WeChat-Report 批量导出】{'🎉 完成' if not res.failed else '⚠ 结束'}\n"
                      f"成功：{res.done} 个 / 失败：{res.failed} 个\n"
                      f"累计消息：{res.messages} 条\n总耗时：{el // 60} 分钟\n"
-                     f"输出目录：{out_dir}")
+                     + (f"docx 渲染失败：{len(render_errs)} 个\n" if render_errs else "")
+                     + f"输出目录：{out_dir}")
         return res
 
     # ------------------------------------------------------------ helpers
@@ -354,6 +389,50 @@ def _at_failsafe_corner(pos, points) -> bool:
     """鼠标是否停在 pyautogui fail-safe 角点（判据与 pyautogui 一致：
     恰在角点像素上，本机实测 [(0,0),(0,1079),(1919,0),(1919,1079)]）。"""
     return tuple(pos) in {tuple(p) for p in points}
+
+
+def _enqueue_render_job(queue_dir: Path, job: dict) -> None:
+    """渲染作业落盘（文件名含毫秒 + 时间戳防碰撞）。"""
+    p = queue_dir / (f"{int(time.time() * 1000) % 100_000:05d}-"
+                     f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.job.json")
+    p.write_text(json.dumps(job, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _revive_err_jobs(queue_dir: Path) -> int:
+    """上次渲染失败的 .err 作业复活为 .job（每次启动重试一轮）。"""
+    n = 0
+    for e in sorted(queue_dir.glob("*.err.json")):
+        e.replace(e.with_suffix("").with_suffix(".json"))
+        n += 1
+    return n
+
+
+def _start_render_worker(queue_dir: Path):
+    """启动 docx 渲染子进程（子进程只做本地渲染，不碰微信；驱动崩溃后
+    靠 _driver_alive 心跳过期自杀，不留守成孤儿）。日志追加在队列目录内。
+    """
+    _revive_err_jobs(queue_dir)
+    log = open(queue_dir / "_render_worker.log", "a", encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, "-X", "utf8", "-m", "wcr.report.render_worker",
+         str(queue_dir)],
+        stdout=log, stderr=subprocess.STDOUT)
+    return proc, log
+
+
+def _drain_render_queue(queue_dir: Path, proc, say,
+                        timeout_s: float = 1800.0) -> None:
+    """写停机标记后等队列排空、子进程退出（末尾若干 docx 收尾）。"""
+    (queue_dir / "_stop").write_text("", encoding="utf-8")
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout_s:
+        if not list(queue_dir.glob("*.job.json")) and (
+                proc is None or proc.poll() is not None):
+            return
+        time.sleep(2.0)
+    left = len(list(queue_dir.glob("*.job.json")))
+    say(f"⚠ 渲染队列 {timeout_s:.0f}s 未排空，剩 {left} 个 docx 未渲染"
+        "（可 python -m wcr.report.render_worker <队列目录> --once 补渲染）")
 
 
 def _wait_mouse_off_corner(say, poll_s: float = 3.0,

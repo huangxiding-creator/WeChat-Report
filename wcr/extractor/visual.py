@@ -16,7 +16,7 @@ import numpy as np
 from ..models import Chat
 from .base import BaseExtractor
 from .bubbles import ImageBubbleDetector
-from .capture import ScreenCapture, imwrite_png
+from .capture import ScreenCapture
 from .composer import MessageComposer
 from .navigator import WeChatNavigator
 from .ocr import OCRParser
@@ -26,6 +26,41 @@ from .timelabels import is_time_label, parse_window
 from .window import WeChatWindow
 
 log = logging.getLogger("wcr.visual")
+
+
+class _AsyncShotWriter:
+    """截图异步落盘：采集循环里同步 imwrite 是纯磁盘等待，挪到单写线程
+    与滚轮停顿/OCR 重叠；flush() 后文件保证可见（断点位置校验读末屏）。
+    微信侧滚轮节奏不变（停顿在下滚调用内部，本类只移走循环里的磁盘段）。"""
+
+    def __init__(self):
+        import queue
+        import threading
+        self._q = queue.Queue()
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+
+    def _run(self):
+        from .capture import imwrite_png
+        while True:
+            item = self._q.get()
+            if item is None:
+                self._q.task_done()
+                return
+            path, img = item
+            imwrite_png(path, img)
+            self._q.task_done()
+
+    def submit(self, path, img) -> None:
+        self._q.put((path, img))
+
+    def flush(self) -> None:
+        self._q.join()
+
+    def close(self) -> None:
+        self._q.put(None)
+        self._t.join()
+
 
 
 class VisualExtractor(BaseExtractor):
@@ -139,59 +174,66 @@ class VisualExtractor(BaseExtractor):
         screen_idx = 0 if not resumed else composer.screen_count
         total_added = 0
         zero_add_screens = 0
+        shots = _AsyncShotWriter() if self.keep_screenshots else None
         say("📸 开始逐屏采集 …")
-        while True:
-            img = cap.grab()
-            if self.keep_screenshots:
-                imwrite_png(shot_dir / f"screen{screen_idx:04d}.png", img)
+        try:
+            while True:
+                img = cap.grab()
+                if self.keep_screenshots:
+                    shots.submit(shot_dir / f"screen{screen_idx:04d}.png", img)
 
-            ocr_texts = ocr.parse(img)
-            time_texts = [t for t in ocr_texts if is_time_label(t["text"])]
-            msg_texts = [t for t in ocr_texts if not is_time_label(t["text"])]
-            voice_marks, msg_texts = self.detector.split_voice_marks(msg_texts)
-            img_rects = self.detector.detect(img, ocr_texts)
-            composer.time_labels[screen_idx] = time_texts
+                ocr_texts = ocr.parse(img)
+                time_texts = [t for t in ocr_texts if is_time_label(t["text"])]
+                msg_texts = [t for t in ocr_texts if not is_time_label(t["text"])]
+                voice_marks, msg_texts = self.detector.split_voice_marks(msg_texts)
+                img_rects = self.detector.detect(img, ocr_texts)
+                composer.time_labels[screen_idx] = time_texts
 
-            added = composer.add_screen(
-                screen_idx, msg_texts, img_rects, voice_marks, img,
-                shot_dir, img_width=img.shape[1],
-            )
-            total_added += added
-            zero_add_screens = zero_add_screens + 1 if added == 0 else 0
+                added = composer.add_screen(
+                    screen_idx, msg_texts, img_rects, voice_marks, img,
+                    shot_dir, img_width=img.shape[1],
+                )
+                total_added += added
+                zero_add_screens = zero_add_screens + 1 if added == 0 else 0
 
-            # 时间窗上界：本屏最早时间标签已晚于 end → 停止
-            if end_dt and time_texts:
-                earliest = ChatScroller.earliest_time_in_texts(time_texts)
-                if earliest and earliest > end_dt:
-                    say(f"   ✔ 已越过时间窗上界 {end_dt:%Y-%m-%d}，停止采集")
+                # 时间窗上界：本屏最早时间标签已晚于 end → 停止
+                if end_dt and time_texts:
+                    earliest = ChatScroller.earliest_time_in_texts(time_texts)
+                    if earliest and earliest > end_dt:
+                        say(f"   ✔ 已越过时间窗上界 {end_dt:%Y-%m-%d}，停止采集")
+                        break
+
+                moved = scroller.scroll_down_one_screen()
+                screen_idx += 1
+                if screen_idx % 10 == 0:
+                    say(f"   已采集 {screen_idx} 屏 / 新增 {total_added} 条")
+                    if self.checkpoint_enabled:
+                        if shots:
+                            shots.flush()   # 末屏在盘上，断点位置校验才有效
+                        composer.save_checkpoint(ckpt)
+                if not moved:
+                    # 下滚冻结甄别：懒加载/负载会整段吞档（实测目标「黄藏寺项目
+                    # 值班」5 屏即停、只采到 1 天）——歇一拍再冲一屏，三重确认
+                    # 仍不动才算采集完成；冲开了就继续正常循环
+                    time.sleep(1.2)
+                    if scroller.scroll_down_one_screen():
+                        screen_idx += 1
+                        continue
+                    time.sleep(1.5)
+                    if scroller.scroll_down_one_screen():
+                        screen_idx += 1
+                        continue
+                    say(f"   ✔ 画面不再变化（三重确认），采集完成（共 {screen_idx} 屏）")
                     break
-
-            moved = scroller.scroll_down_one_screen()
-            screen_idx += 1
-            if screen_idx % 10 == 0:
-                say(f"   已采集 {screen_idx} 屏 / 新增 {total_added} 条")
-                if self.checkpoint_enabled:
-                    composer.save_checkpoint(ckpt)
-            if not moved:
-                # 下滚冻结甄别：懒加载/负载会整段吞档（实测目标「黄藏寺项目
-                # 值班」5 屏即停、只采到 1 天）——歇一拍再冲一屏，三重确认
-                # 仍不动才算采集完成；冲开了就继续正常循环
-                time.sleep(1.2)
-                if scroller.scroll_down_one_screen():
-                    screen_idx += 1
-                    continue
-                time.sleep(1.5)
-                if scroller.scroll_down_one_screen():
-                    screen_idx += 1
-                    continue
-                say(f"   ✔ 画面不再变化（三重确认），采集完成（共 {screen_idx} 屏）")
-                break
-            if zero_add_screens >= 20:
-                say(f"   ⚠ 连续 {zero_add_screens} 屏无新增消息（可能有动图/视频在播放），停止")
-                break
-            if screen_idx > self.max_screens:
-                say(f"   ⚠ 屏数超过 {self.max_screens} 上限，强制结束")
-                break
+                if zero_add_screens >= 20:
+                    say(f"   ⚠ 连续 {zero_add_screens} 屏无新增消息（可能有动图/视频在播放），停止")
+                    break
+                if screen_idx > self.max_screens:
+                    say(f"   ⚠ 屏数超过 {self.max_screens} 上限，强制结束")
+                    break
+        finally:
+            if shots:
+                shots.close()
 
         # 7. 收尾：时间回填 + 排序 + 过滤 + 持久化
         composer.assign_times(composer.time_labels)

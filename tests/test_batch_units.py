@@ -1217,5 +1217,76 @@ class TestWindowFindStrict(unittest.TestCase):
             self._find([self._W("微信聊天记录.txt - 记事本")])
 
 
+class TestRenderWorkerAsyncDocx(unittest.TestCase):
+    """docx 后台渲染（提速且零微信交互改动，2026-09-06 用户指示）：
+    JSON 作业入队 → 渲染 → docx 落盘；失败留 .err 可复活；截图写线程
+    flush 后文件可见（断点校验依赖）。"""
+
+    def _job(self, d):
+        json_path = d / "渲染群_messages.json"
+        chat = Chat(name="渲染群", messages=[
+            Message(kind="text", text="收到", side="left", speaker="刘浩",
+                    timestamp=datetime(2026, 8, 20, 10, 0)),
+        ], captured_at="", time_window="")
+        chat.to_json(json_path)
+        docx_path = d / "渲染群_聊天记录_测试.docx"
+        return {"name": "渲染群", "json_path": str(json_path),
+                "docx_path": str(docx_path), "time_window": "",
+                "max_images": 0}, docx_path
+
+    def test_drain_renders_job(self):
+        import tempfile
+        from wcr.batch import _enqueue_render_job
+        from wcr.report.render_worker import drain_queue
+        d = Path(tempfile.mkdtemp())
+        q = d / "_render_queue"
+        q.mkdir()
+        job, docx_path = self._job(d)
+        _enqueue_render_job(q, job)
+        said: list[str] = []
+        n = drain_queue(q, once=True, say=said.append)
+        self.assertEqual(n, 1)
+        self.assertTrue(docx_path.exists())
+        self.assertEqual(list(q.glob("*.job.json")), [])   # 作业已消费
+        self.assertIn("✔", "".join(said))
+
+    def test_failed_job_kept_as_err(self):
+        import json as _json
+        import tempfile
+        from wcr.report.render_worker import drain_queue
+        d = Path(tempfile.mkdtemp())
+        q = d / "_render_queue"
+        q.mkdir()
+        (q / "00001-x.job.json").write_text(_json.dumps({
+            "json_path": str(d / "不存在.json"),
+            "docx_path": str(d / "out.docx")}), encoding="utf-8")
+        n = drain_queue(q, once=True, say=lambda m: None)
+        self.assertEqual(n, 0)
+        self.assertEqual(len(list(q.glob("*.err.json"))), 1)
+
+    def test_revive_err_jobs(self):
+        import tempfile
+        from wcr.batch import _revive_err_jobs
+        q = Path(tempfile.mkdtemp()) / "_render_queue"
+        q.mkdir()
+        (q / "00001-渲染群.job.err.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(_revive_err_jobs(q), 1)
+        self.assertEqual(list(q.glob("*.job.json"))[0].name,
+                         "00001-渲染群.job.json")
+
+    def test_async_shot_writer_flush(self):
+        import tempfile
+        import numpy as np
+        from wcr.extractor.visual import _AsyncShotWriter
+        d = Path(tempfile.mkdtemp())
+        w = _AsyncShotWriter()
+        for i in range(3):
+            w.submit(d / f"s{i}.png", np.zeros((20, 20, 3), dtype=np.uint8))
+        w.flush()
+        for i in range(3):
+            self.assertTrue((d / f"s{i}.png").exists())
+        w.close()      # 哨兵 + join：线程干净退出
+
+
 if __name__ == "__main__":
     unittest.main()
