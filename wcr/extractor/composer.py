@@ -221,11 +221,17 @@ class MessageComposer:
 
     # ------------------------------------------------------------ checkpoint
     def save_checkpoint(self, path: Path) -> None:
+        # time_labels 只持久化 text/cy（assign_times 仅用这两项）——原始 OCR
+        # 项带 box ndarray，直接 json.dumps 会 "ndarray is not JSON
+        # serializable" 崩掉第 10 屏首次存档（2026-09-05 值班组实测）
+        safe_labels = {str(k): [{"text": l["text"], "cy": l.get("cy", 0)}
+                                for l in v]
+                       for k, v in self.time_labels.items()}
         payload = {
             "screen_count": self.screen_count,
             "seen": {f"{k[0]}|{k[1]}": v for k, v in self.seen.items()},
             "messages": [m.to_dict() for m in self.messages],
-            "time_labels": {str(k): v for k, v in self.time_labels.items()},
+            "time_labels": safe_labels,
             "last_parsed_time": (self.last_parsed_time.strftime("%Y-%m-%d %H:%M:%S")
                                  if self.last_parsed_time else ""),
         }

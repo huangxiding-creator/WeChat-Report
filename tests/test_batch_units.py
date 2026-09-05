@@ -749,6 +749,30 @@ class TestCheckpointTimeLabels(unittest.TestCase):
         self.assertEqual(c2.time_labels, c1.time_labels)
         self.assertEqual(c2.screen_count, 2)
 
+    def test_realtime_labels_with_ndarray_box_survive(self):
+        """真实采集的标签项带 box ndarray → 存档须剥掉（首次存档即崩的实测），
+        且 text/cy 往返保真。"""
+        import tempfile
+        from pathlib import Path
+        import numpy as np
+        from wcr.extractor.composer import MessageComposer
+
+        c1 = MessageComposer(speaker_attribution=False)
+        box = np.array([[10, 20], [10, 40], [200, 40], [200, 20]],
+                       dtype=np.float32)
+        c1.time_labels = {0: [{"text": "2026年8月5日", "cy": 30, "box": box,
+                               "score": 0.9}]}
+        c1.screen_count = 1
+        c1.messages = [Message(kind="text", text="收到", side="left",
+                               timestamp=None)]
+        p = Path(tempfile.mkdtemp()) / "ckpt.json"
+        c1.save_checkpoint(p)          # 不应抛 JSON 序列化异常
+
+        c2 = MessageComposer(speaker_attribution=False)
+        self.assertTrue(c2.load_checkpoint(p))
+        self.assertEqual(c2.time_labels[0],
+                         [{"text": "2026年8月5日", "cy": 30}])
+
 
 class TestFramesRelate(unittest.TestCase):
     """断点位置校验：同区域视图高相关、不同区域低相关。"""
