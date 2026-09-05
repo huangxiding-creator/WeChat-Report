@@ -212,16 +212,21 @@ def _row_stamp(raw_texts: list[dict], row_y: int, fused: str,
     return fused
 
 
-def stamp_older_than(stamp: str, cutoff) -> "bool | None":
+def stamp_older_than(stamp: str, cutoff, today=None) -> "bool | None":
     """列表时间戳是否**明确**早于窗起点 cutoff(datetime.date)。
 
     返回三值：True=明确早于（可安全跳过）；False=明确不早于；None=无法判定
-    （昨天/21:36/8-29 这类无年份形式、OCR 坏读数 → 保守保留，交采集阶段处理）。
-    列表按最近活跃排序，右列年份戳（2024/07/23）= 最后一条消息时间，
-    是"365 天窗外→导出必为 0 条"的可靠信号（试点 3 两个 2024/10 聊天实证）。
+    （OCR 坏读数 → 保守保留，交采集阶段处理）。
+
+    按微信 4.x 列表戳显示语义解析（2026-09-05 用户指示 + 实测确认）：
+      一周内 → HH:MM/昨天/星期X；**今年内 → MM/DD 不带年**；往年 → YYYY/MM。
+    由此无年份形式也可判定：MM/DD 必为今年——除非晚于今天，晚于今天的
+    "12/17" 只能是往年戳的残片（实测：名"杜雨北京海淀..2025/"配戳
+    "12/17"，真值 2025/12/17）。
     """
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
     s = _norm_stamp_digits(stamp)
+    today = today or _date.today()
     m = re.match(r"^((?:19|20)\d{2})[/.-](\d{1,2})(?:[/.-](\d{1,2}))?", s)
     if m:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3) or 1)
@@ -233,7 +238,28 @@ def stamp_older_than(stamp: str, cutoff) -> "bool | None":
         return None
     if re.fullmatch(r"(?:19|20)\d{2}", s):        # 仅年份（粘连剥出）
         y = int(s)
-        return True if y < cutoff.year else None  # 同年无法判月 → 保守保留
+        if y < cutoff.year:
+            return True
+        if y > cutoff.year:
+            return False
+        return None                               # 同年无法判月 → 保守保留
+    # 一周内形式：真实日期必落在 [today-6, today]
+    if re.fullmatch(r"\d{1,2}[:：]\d{2}|昨天|前天|星期[一二三四五六日天]"
+                    r"|周[一二三四五六日天]", s):
+        return (today - _td(days=6)) < cutoff
+    # MM/DD（不带年）：今年显示语义；晚于今天 → 只能是往年残片
+    m = re.fullmatch(r"(\d{1,2})[/.-](\d{1,2})", s)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        if not (1 <= mo <= 12 and 1 <= d <= 31):
+            return None                           # 86/45 之类坏读数
+        try:
+            cand = _date(today.year, mo, d)
+            if cand > today:
+                cand = _date(today.year - 1, mo, d)
+        except ValueError:
+            return None
+        return cand < cutoff
     return None
 
 

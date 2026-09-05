@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--cli", action="store_true", help="命令行模式（不开 GUI）")
     parser.add_argument("--chats", action="append", default=[],
                         help="目标聊天名（可多次指定：多聊天合并报告）")
-    parser.add_argument("--window", default="", help="时间窗：7d / 2026-03 / 2026-01-01~2026-08-27")
+    parser.add_argument("--window", default="", help="时间窗：7d / 2026-03 / 2026-01-01~2026-08-27；或年份 2026=只采列表戳在2026内的会话(全量深度)")
     parser.add_argument("--template", default="work", choices=["work", "progress", "general"])
     parser.add_argument("--title", default="", help="报告标题（空=自动）")
     parser.add_argument("--json", action="append", default=[],

@@ -260,15 +260,15 @@ class VisualExtractor(BaseExtractor):
 
     def _scroll_up_with_window(self, scroller: ChatScroller, cap: ScreenCapture,
                                ocr: OCRParser, start_dt, say) -> None:
-        """向上滚动；时间窗模式下周期 OCR 探测最早时间标签。
+        """向上滚动；时间窗模式下周期 OCR 探测最早时间标签，无窗起点
+        （全量深度，年份令牌选择）时滚到动态加载两轮验证的真顶。
 
         兜底：连续多次探测不到任何时间标签 → 判定采集区异常，立即报错
         （避免空转）；画面稳定 → 已到顶，正常返回。
         """
-        if start_dt is None:
-            scroller.scroll_to_top()
-            return
-        say(f"⏫ 向上滚动至时间窗起点 {start_dt:%Y-%m-%d} …")
+        target = (f"时间窗起点 {start_dt:%Y-%m-%d}" if start_dt
+                  else "聊天顶部（全量深度）")
+        say(f"⏫ 向上滚动至{target} …")
         probe_every = 6          # 每 6 次大滚动 OCR 一次（OCR 是探针主要
                                   # 开销，加密滚轮提高推进速度）
         empty_probes = 0         # 连续 OCR 到 0 个文本块 → 采集区异常
@@ -300,7 +300,7 @@ class VisualExtractor(BaseExtractor):
                     earliest = scroller.earliest_time_in_texts(labels, last_seen)
                     if earliest:
                         last_seen = earliest
-                        if earliest <= start_dt:
+                        if start_dt and earliest <= start_dt:
                             say(f"   ✔ 已到达时间窗起点（见到 {earliest:%Y-%m-%d %H:%M}）")
                             return
                 # 文本集稳定性：动图只改像素不改 OCR 文本，是比帧差更可靠的到顶判据
@@ -322,7 +322,7 @@ class VisualExtractor(BaseExtractor):
             if deadline is not None and time.monotonic() > deadline:
                 say(f"   ⚠ 上滚超过 {int(self.scrollup_time_budget)}s 预算，按现有位置继续采集")
                 return
-        say("   ⚠ 未遇到时间窗起点，按现有位置继续采集")
+        say("   ⚠ 上滚轮数用尽，按现有位置继续采集")
 
     def _top_verify_stable(self, scroller, cap, ocr, cur: frozenset,
                            say) -> bool:

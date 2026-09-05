@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,9 +65,16 @@ class BatchExporter:
         _wait_mouse_off_corner(self.say)
 
         from .pipeline import make_visual_extractor
-        # probe 模式：上滚逐屏 OCR 探测，见到早于窗起点的标签即停；文本集
-        # 连续稳定 = 到缓存顶（GIF 动图免疫）；900s 预算兜底。top 模式实测
-        # 会在缓存顶转轮上 800 档空转 10 分钟（懒加载转轮让帧差永不相等）
+        # 年份令牌（如 "2026"）= 活跃年选择语义（用户 2026-09-05 指示）：
+        # 只采列表右列戳在 2026 内的会话（= 最后一条消息在 2026 年），
+        # 深度为**全量**——滚到验证过的真顶、不做消息级时间窗过滤；
+        # "365d" 等仍是消息窗语义
+        year_sel = re.fullmatch(r"(20\d{2})", (time_window or "").strip())
+        capture_window = "" if year_sel else time_window
+        # probe 模式：上滚逐屏 OCR 探测，见到早于窗起点的标签即停（年份令牌
+        # 下无窗起点 → 滚到动态加载两轮验证的真顶）；文本集连续稳定 = 到顶
+        # 候选（GIF 动图免疫）。top 模式实测会在缓存顶转轮上 800 档空转 10
+        # 分钟（懒加载转轮让帧差永不相等）
         ext = make_visual_extractor(self.cfg, out_dir, scrollup_mode="probe")
         max_images = self.cfg.get_int("batch", "max_images_embed", 50)
         report_every = self.cfg.get_int("batch", "report_every", 5)
@@ -115,9 +123,11 @@ class BatchExporter:
         #   预过滤后的数量——窗内 100 项 × 65px 远小于列表真实高度）
         from .extractor.navigator import scroll_session_list_to_top
         scroll_session_list_to_top(win, guard, expected_items=n_all)
-        self.say(f"🎯 批量导出：{res.total} 个聊天，时间窗 {time_window}")
+        scope = (f"活跃 ≥ {year_sel.group(1)} 年（全量深度）" if year_sel
+                 else f"时间窗 {time_window}")
+        self.say(f"🎯 批量导出：{res.total} 个聊天，{scope}")
         self._notify(f"【WeChat-Report 批量导出】启动\n目标聊天：{res.total} 个"
-                     f"\n时间窗：{time_window}\n已完成（断点）：{len(progress)} 个")
+                     f"\n范围：{scope}\n已完成（断点）：{len(progress)} 个")
 
         # 2. 逐个导出
         t0 = time.monotonic()
@@ -150,15 +160,16 @@ class BatchExporter:
                                          expected_items=n_all,
                                          start_from_current=True):
                         raise RuntimeError("会话列表中未找到（或点击验证失败）")
-                    # 采集（already_open：跳过 extract 内部导航）
-                    chat = ext.extract(name, time_window, self.say,
+                    # 采集（already_open：跳过 extract 内部导航；年份令牌下
+                    # capture_window="" → 全量深度到真顶）
+                    chat = ext.extract(name, capture_window, self.say,
                                        already_open=True)
                     # 整理成独立 word（无 AI）
                     from .report.transcript_docx import build_transcript_docx
                     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     docx_path = out_dir / f"{_safe(name)}_聊天记录_{stamp}.docx"
                     build_transcript_docx(chat, docx_path,
-                                          time_window=time_window,
+                                          time_window=capture_window,
                                           max_images=max_images)
                     kb = docx_path.stat().st_size / 1024
                     self.say(f"💾 「{name}」完成：{len(chat.messages)} 条 → "
@@ -206,25 +217,23 @@ class BatchExporter:
 
     # ------------------------------------------------------------ helpers
     def _prefilter_window(self, names: list[str], stamps: dict[str, str],
-                          time_window: str) -> list[str]:
-        """按列表时间戳预过滤：戳明确早于窗起点的聊天直接跳过。
+                          time_window: str, today=None) -> list[str]:
+        """按列表时间戳预过滤：戳明确早于截止日的聊天直接跳过。
 
-        列表按最近活跃排序，右列年份戳（如 2024/07/23）= 最后一条消息
-        时间——早于窗起点意味着导出必为 0 条（试点 3 两个 2024/10 聊天
-        实证）。无戳/戳无法判定 → 保守保留（采集阶段再兜底）。
-        典型收益：本账号 ~600 项中 ~2024/* 戳的占多数，全量耗时大降。
+        列表按最近活跃排序，右列戳（如 2024/07/23、12/17）= 最后一条
+        消息时间。年份令牌（"2026"）语义下微信显示规则把无年份形式也
+        变成可判定（今年内才显示 MM/DD，未来 MM/DD 必为往年残片），
+        实测 612 戳中仅 16 个老戳、595+ 个可证 2026 活跃。无戳/坏读数
+        → 保守保留（采集阶段再兜底）。
 
         戳按 OCR 读数键控；去重后的目标名可能是另一读数（更长变体），
         先经 name_variant 簇匹配把戳关联到目标名，再判窗。
         """
-        from datetime import datetime
         from .extractor.navigator import name_variant
         from .extractor.session_enum import stamp_older_than
-        from .extractor.timelabels import parse_window
-        start_dt, _ = parse_window(time_window, now=datetime.now())
-        if start_dt is None or not stamps:
+        cutoff = _window_cutoff(time_window)
+        if cutoff is None or not stamps:
             return names
-        cutoff = start_dt.date()
 
         # 目标名 → 簇内任一读数的戳（精确键优先，变体兜底）
         stamp_keys = list(stamps.keys())
@@ -244,15 +253,14 @@ class BatchExporter:
 
         kept, dropped = [], []
         for n in names:
-            older = stamp_older_than(_stamp_for(n), cutoff)
+            older = stamp_older_than(_stamp_for(n), cutoff, today)
             (dropped if older else kept).append(n)
         # 裁尾规则：列表严格按最近活跃排序——最后一个"明确在窗内"的戳
-        # 之后的全部项都必然更旧。老聊天右列 2024/* 淡灰小字戳在快速滚动
-        # 下漏采严重（实测 556 戳仅 9 个年份戳，逐名过滤只滤掉个位数），
-        # 靠排序性质可整段裁掉数百个窗外老聊天（全量跑省 7~10 小时）。
+        # 之后的全部项都必然更旧（含无戳老聊天：右列 2024/* 淡灰小字戳
+        # 在快速滚动下漏采严重，逐名过滤滤不掉，靠排序性质整段裁）。
         last_in = -1
         for idx, n in enumerate(kept):
-            if stamp_older_than(_stamp_for(n), cutoff) is False:
+            if stamp_older_than(_stamp_for(n), cutoff, today) is False:
                 last_in = idx
         if 0 <= last_in < len(kept) - 1:
             n_tail = len(kept) - 1 - last_in
@@ -294,6 +302,18 @@ class BatchExporter:
 def _safe(name: str) -> str:
     return "".join(c if (c.isalnum() or c in "-_一-龥") else "_"
                    for c in name).strip("_")[:60] or "chat"
+
+
+def _window_cutoff(time_window: str):
+    """预过滤截止日期：'2026' 年份令牌 → 该年 1 月 1 日（活跃年选择语义，
+    用户 2026-09-05 指示）；'365d' 等 → 窗起点；''/无法解析 → None。"""
+    from datetime import date, datetime
+    m = re.fullmatch(r"(20\d{2})", (time_window or "").strip())
+    if m:
+        return date(int(m.group(1)), 1, 1)
+    from .extractor.timelabels import parse_window
+    start_dt, _ = parse_window(time_window or "", now=datetime.now())
+    return start_dt.date() if start_dt else None
 
 
 def _match_only(names: list[str], only: list[str]) -> list[str]:

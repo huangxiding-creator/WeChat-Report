@@ -372,24 +372,29 @@ class TestFoldedGroupSkipped(unittest.TestCase):
 
 
 class TestStampOlderThan(unittest.TestCase):
-    """列表时间戳窗判定：True=明确早于窗起点（可跳），None=无法判定（保守保留）。"""
+    """列表时间戳窗判定：True=明确早于窗起点（可跳），False=明确不早于，
+    None=无法判定（保守保留）。today 全部钉死（判定依赖真实日期会变时间炸弹）。"""
 
     def _cutoff(self):
         from datetime import date
-        return date(2025, 9, 4)          # 365d 窗，today=2026-09-04
+        return date(2025, 9, 4)          # 365d 窗
+
+    def _today(self):
+        from datetime import date
+        return date(2026, 9, 4)
 
     def test_year_stamp_variants_old(self):
         from wcr.extractor.session_enum import stamp_older_than
-        c = self._cutoff()
+        c, t = self._cutoff(), self._today()
         for st in ("2024/07/23", "2024/10", "2024", "2024/7/5", "2024-06-30"):
-            self.assertIs(stamp_older_than(st, c), True, st)
+            self.assertIs(stamp_older_than(st, c, t), True, st)
 
     def test_ocr_mangled_stamps(self):
         """实测乱读 '2U24/U9/2U'（=2024/09/20）、'2024/0//U2' → 归一后判旧。"""
         from wcr.extractor.session_enum import stamp_older_than
-        c = self._cutoff()
-        self.assertIs(stamp_older_than("2U24/U9/2U", c), True)
-        self.assertIs(stamp_older_than("2O24/1O/05", c), True)
+        c, t = self._cutoff(), self._today()
+        self.assertIs(stamp_older_than("2U24/U9/2U", c, t), True)
+        self.assertIs(stamp_older_than("2O24/1O/05", c, t), True)
 
     def test_mangled_stamp_captured(self):
         """右列乱读戳也能被 _row_stamp 捕获（采集侧不丢）。"""
@@ -410,21 +415,53 @@ class TestStampOlderThan(unittest.TestCase):
 
     def test_in_window_not_old(self):
         from wcr.extractor.session_enum import stamp_older_than
-        c = self._cutoff()
+        c, t = self._cutoff(), self._today()
         for st in ("2026/09/01", "2025/10/03", "2025/09/05"):
-            self.assertIs(stamp_older_than(st, c), False, st)
+            self.assertIs(stamp_older_than(st, c, t), False, st)
 
     def test_unjudgeable_kept(self):
-        """无年份形式（昨天/21:36/8-29）与坏读数 → None 保守保留。"""
+        """坏读数/空戳/同年仅年份 → None 保守保留。"""
         from wcr.extractor.session_enum import stamp_older_than
-        c = self._cutoff()
-        for st in ("", "昨天", "21:36", "8-29", "U4/U/ 1", "2025", "星期三"):
-            self.assertIs(stamp_older_than(st, c), None, st)
+        c, t = self._cutoff(), self._today()
+        for st in ("", "U4/U/ 1", "2025", "86/45"):
+            self.assertIs(stamp_older_than(st, c, t), None, st)
+
+    def test_recent_forms_decidable_in_window(self):
+        """微信 UI 语义：一周内形式（昨天/星期/HH:MM）必在最近 7 天 →
+        对一切 ≤今天的窗起点都可判"不早于"（用户 2026-09-05 指示的
+        活跃年选择正是靠它 + MM/DD 语义判定 595+/612 戳）。"""
+        from wcr.extractor.session_enum import stamp_older_than
+        t = self._today()
+        for st in ("昨天", "星期三", "21:36", "8-29"):
+            self.assertIs(stamp_older_than(st, self._cutoff(), t), False, st)
+            self.assertIs(stamp_older_than(st, t.replace(month=1, day=1), t),
+                          False, st)
+
+    def test_mmdd_future_is_previous_year_fragment(self):
+        """未来 MM/DD = 往年残片（实测 名'杜雨北京海淀..2025/'配戳'12/17'）：
+        选 2026 活跃年时 12/17 → 2025-12-17 → 判旧剔除。"""
+        from wcr.extractor.session_enum import stamp_older_than
+        t = self._today()
+        y26 = t.replace(month=1, day=1)
+        self.assertIs(stamp_older_than("12/17", y26, t), True)
+        self.assertIs(stamp_older_than("12/29", y26, t), True)
+        self.assertIs(stamp_older_than("04/07", y26, t), False)   # 今年4月
+        # 365d 语义下 12/17 解析为 2025-12-17：仍在窗内（不早于 2025-09-04）
+        self.assertIs(stamp_older_than("12/17", self._cutoff(), t), False)
+
+    def test_year_only_token(self):
+        from wcr.extractor.session_enum import stamp_older_than
+        t = self._today()
+        y26 = t.replace(month=1, day=1)
+        self.assertIs(stamp_older_than("2025", y26, t), True)    # <2026
+        self.assertIs(stamp_older_than("2027", y26, t), False)   # >2026
+        self.assertIs(stamp_older_than("2026", y26, t), None)    # 同年无月
 
     def test_bad_month_falls_back(self):
         """坏月份（2024/13）逐级回退到年 → 仍判旧。"""
         from wcr.extractor.session_enum import stamp_older_than
-        self.assertIs(stamp_older_than("2024/13/99", self._cutoff()), True)
+        self.assertIs(stamp_older_than("2024/13/99", self._cutoff(),
+                                       self._today()), True)
 
 
 class TestClusterSessionsStamp(unittest.TestCase):
@@ -805,7 +842,12 @@ class TestFramesRelate(unittest.TestCase):
 
 
 class TestPrefilterTailCut(unittest.TestCase):
-    """裁尾规则：列表按日期排序，最后一个"明确窗内"戳之后的项整段跳过。"""
+    """裁尾规则：列表按日期排序，最后一个"明确窗内"戳之后的项整段跳过。
+    today 钉死（MM/DD/昨天的可判性依赖真实日期）。"""
+
+    def _today(self):
+        from datetime import date
+        return date(2026, 9, 4)
 
     def test_tail_cut(self):
         from wcr.batch import BatchExporter
@@ -813,7 +855,7 @@ class TestPrefilterTailCut(unittest.TestCase):
         names = ["A活跃", "B无戳", "C旧置顶", "D去年12月", "E无戳老", "F更老无戳"]
         stamps = {"A活跃": "昨天", "B无戳": "", "C旧置顶": "2024/10",
                   "D去年12月": "2025/12/18", "E无戳老": "", "F更老无戳": ""}
-        out = be._prefilter_window(names, stamps, "365d")
+        out = be._prefilter_window(names, stamps, "365d", today=self._today())
         # C 被逐名过滤（2024 置顶老聊天）；D 之后再无窗内戳 → E/F 裁尾
         self.assertEqual(out, ["A活跃", "B无戳", "D去年12月"])
 
@@ -821,9 +863,26 @@ class TestPrefilterTailCut(unittest.TestCase):
         """无任何明确窗内戳 → 不裁尾（保守，全部保留交采集兜底）。"""
         from wcr.batch import BatchExporter
         be = BatchExporter(None)
-        out = be._prefilter_window(["A", "B", "C"], {"A": "昨天", "B": "8-29",
-                                                     "C": "2024/10"}, "365d")
-        self.assertEqual(out, ["A", "B"])    # 仅逐名过滤 C，B 无年份戳保留
+        out = be._prefilter_window(
+            ["A", "B", "C"], {"A": "昨天", "B": "8-29", "C": "2024/10"},
+            "365d", today=self._today())
+        self.assertEqual(out, ["A", "B"])    # 仅逐名过滤 C，8-29=今年→保留
+
+    def test_year_token_selection(self):
+        """年份令牌 "2026"：只留列表戳在 2026 内的会话（用户 2026-09-05
+        指示）。明确年份戳与"未来 MM/DD 残片"逐名剔除；无戳名靠裁尾。"""
+        from wcr.batch import BatchExporter
+        be = BatchExporter(None)
+        names = ["今天活跃", "三月聊过", "置顶2024", "无戳X", "去年残片",
+                 "无戳尾1", "无戳尾2"]
+        stamps = {"今天活跃": "19:30", "三月聊过": "03/15", "置顶2024": "2024/11/06",
+                  "无戳X": "", "去年残片": "12/17", "无戳尾1": "", "无戳尾2": ""}
+        out = be._prefilter_window(names, stamps, "2026", today=self._today())
+        # 置顶2024 明确老、去年残片 12/17=2025-12-17 → 逐名剔除；
+        # 三月聊过 03/15=2026-03-15 → 最后 2026 证据；其后（无戳X/尾1/尾2，
+        # 按列表排序活跃必 ≤ 三月）整段裁尾——真实列表中 2026 证据延续到
+        # ~第 611 项，被裁的只有真正的老聊天尾巴
+        self.assertEqual(out, ["今天活跃", "三月聊过"])
 
 
 class TestMatchOnly(unittest.TestCase):
@@ -927,6 +986,17 @@ class TestScrollUpDynamicTop(unittest.TestCase):
         joined = "\n".join(says)
         self.assertIn("动态加载两轮验证均无变化", joined)
         self.assertEqual(wheel.count(15 * 24), 2)   # 两轮验证大冲
+
+    def test_full_depth_no_window_to_top(self):
+        """全量深度（年份令牌选择，start_dt=None）：无窗起点可停 → 探针
+        一路滚到动态加载两轮验证的真顶（用户 2026-09-05 指示）。"""
+        a = self._screen(["张三：收到", "李四：好的"])
+        says, wheel = self._run([a] * 12, None)
+        joined = "\n".join(says)
+        self.assertIn("聊天顶部（全量深度）", joined)
+        self.assertIn("动态加载两轮验证均无变化", joined)
+        self.assertNotIn("到达时间窗起点", joined)
+        self.assertEqual(wheel.count(15 * 24), 2)
 
     def test_verify_empty_ocr_not_top(self):
         """验证时 OCR 为空 → 不认顶，继续上滚（此处随后滚到窗起点收尾）。"""
