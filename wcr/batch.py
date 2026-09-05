@@ -45,7 +45,8 @@ class BatchExporter:
     # ------------------------------------------------------------ entry
     def run(self, out_dir: Path, time_window: str = "365d",
             limit: int = 0, resume: bool = True,
-            retry_failed: bool = True) -> BatchResult:
+            retry_failed: bool = True,
+            only: Optional[list[str]] = None) -> BatchResult:
         res = BatchResult()
         out_dir.mkdir(parents=True, exist_ok=True)
         progress_path = out_dir / "_batch_progress.json"
@@ -97,6 +98,14 @@ class BatchExporter:
         kept = self._prefilter_window(deduped, enumerator.stamps, time_window)
         n_all = len(deduped)   # 预过滤前的全列表长度：滚动/扫描预算按真实高度
         names = kept
+        if only:
+            hits = _match_only(names, only)
+            if not hits:
+                self.say(f"   ⚠ 定向名单无命中：{only}（枚举 {len(names)} 名）")
+                raise RuntimeError("定向名单无命中")
+            self.say(f"   定向名单：{len(names)} → {len(hits)} 个命中（请求 "
+                     f"{len(only)} 名）")
+            names = hits
         if limit:
             names = names[:limit]
         res.total = len(names)
@@ -285,6 +294,21 @@ class BatchExporter:
 def _safe(name: str) -> str:
     return "".join(c if (c.isalnum() or c in "-_一-龥") else "_"
                    for c in name).strip("_")[:60] or "chat"
+
+
+def _match_only(names: list[str], only: list[str]) -> list[str]:
+    """定向名单过滤：列表名与任一请求名互为变体/互含即命中（保序）。
+
+    请求名常比枚举名短（"黄藏寺项目值班" vs 列表 "黄藏寺项目值班值守"），
+    双向子串 + name_variant 三级判据兜 OCR 变体；命中为空 = 全部失配。
+    """
+    from .extractor.navigator import name_variant
+
+    hits: list[str] = []
+    for n in names:
+        if any(n == o or name_variant(n, o) or o in n or n in o for o in only):
+            hits.append(n)
+    return hits
 
 
 def _at_failsafe_corner(pos, points) -> bool:

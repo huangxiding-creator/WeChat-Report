@@ -85,6 +85,7 @@ python main.py --cli --chats "群名" --window 7d --template work
 # 批量导出：枚举全部会话，每个聊天一份"聊天记录整理"word（无 AI、零成本）
 python main.py --cli --all --window 365d
 python main.py --cli --all --limit 3 --window 365d   # 先试点 3 个
+python main.py --cli --all --only "黄藏寺项目值班" --window 365d   # 定向导出（模糊匹配）
 ```
 
 > 批量模式会长时间占用鼠标（逐聊天滚动采集），期间请勿操作电脑；
@@ -206,7 +207,7 @@ build.bat                PyInstaller 绿色打包
 ## 🧪 测试
 
 ```bash
-python -m unittest discover -s tests -v   # 109 个用例，无需微信/AI即可跑
+python -m unittest discover -s tests -v   # 127 个用例，无需微信/AI即可跑
 ```
 
 ### 真机实测（微信 4.1，Windows 10）

@@ -37,6 +37,8 @@ def main():
                         help="批量模式：枚举全部会话，每个聊天导出一份聊天记录 word")
     parser.add_argument("--limit", type=int, default=0,
                         help="批量模式试点：只处理前 N 个聊天（0=全部）")
+    parser.add_argument("--only", default="",
+                        help="批量模式定向名单：逗号分隔，模糊匹配（如 \"黄藏寺项目值班,黄春健\"）")
     parser.add_argument("--output", default="", help="输出目录（默认 ./output）")
     parser.add_argument("--gen-example-config", action="store_true",
                         help="生成 config.example.ini 后退出")
@@ -65,7 +67,8 @@ def main():
         from wcr.batch import BatchExporter
         out_dir = Path(args.output) if args.output else cfg.output_dir / "批量导出"
         res = BatchExporter(cfg, on_progress=print).run(
-            out_dir, time_window=args.window or "365d", limit=args.limit)
+            out_dir, time_window=args.window or "365d", limit=args.limit,
+            only=[x.strip() for x in args.only.split(",") if x.strip()] or None)
         return 0 if res.failed == 0 else 1
 
     if args.cli:

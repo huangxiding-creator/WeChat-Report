@@ -802,5 +802,34 @@ class TestPrefilterTailCut(unittest.TestCase):
         self.assertEqual(out, ["A", "B"])    # 仅逐名过滤 C，B 无年份戳保留
 
 
+class TestMatchOnly(unittest.TestCase):
+    """定向名单：--only 请求名可与枚举名互为变体/互含（请求常更短）。"""
+
+    def test_short_request_hits_long_list_name(self):
+        """请求「黄藏寺项目值班」命中列表「黄藏寺项目值班值守」。"""
+        from wcr.batch import _match_only
+        names = ["黄藏寺现场处置组", "黄藏寺项目值班值守", "总包之声UP主"]
+        self.assertEqual(_match_only(names, ["黄藏寺项目值班"]),
+                         ["黄藏寺项目值班值守"])
+
+    def test_exact_and_variant(self):
+        from wcr.batch import _match_only
+        names = ["赵嫣嫣AI事务所", "黄春健"]
+        self.assertEqual(_match_only(names, ["赵嫣嫣AI事务所"]),   # 精确
+                         ["赵嫣嫣AI事务所"])
+        self.assertEqual(_match_only(names, ["赵A事务所"]),         # OCR 变体
+                         ["赵嫣嫣AI事务所"])
+
+    def test_no_match_empty(self):
+        from wcr.batch import _match_only
+        self.assertEqual(_match_only(["黄春健", "刘宇峰"], ["不存在的人"]), [])
+
+    def test_multiple_requests(self):
+        from wcr.batch import _match_only
+        names = ["处置组", "值班组", "无关群"]
+        self.assertEqual(_match_only(names, ["处置", "值班"]),
+                         ["处置组", "值班组"])
+
+
 if __name__ == "__main__":
     unittest.main()
