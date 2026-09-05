@@ -604,6 +604,33 @@ class TestTranscriptDocx(unittest.TestCase):
         # 只统计：文字 3 / 图片 0 / 语音 1
         self.assertIn("文字 3 条 / 图片 0 张 / 语音 1 条", joined)
 
+    def test_chronological_ordering(self):
+        """乱序消息（沉寂段整块错位）→ 渲染后日期分隔单调递增，
+        无时间戳消息前向填充贴住前条（不飘到文档头、不另起分隔）。"""
+        msgs = [
+            Message(kind="text", text="八月消息A", side="left",
+                    timestamp=datetime(2026, 8, 3, 9, 0)),
+            Message(kind="text", text="四月旧块", side="left",
+                    timestamp=datetime(2026, 4, 24, 10, 0)),
+            Message(kind="text", text="二月出生", side="left",
+                    timestamp=datetime(2026, 2, 11, 8, 0)),
+            Message(kind="text", text="八月消息B", side="left",
+                    timestamp=datetime(2026, 8, 5, 21, 0)),
+            Message(kind="text", text="无时间戳跟随", side="left",
+                    timestamp=None),
+        ]
+        chat = Chat(name="测试群", messages=msgs, captured_at="", time_window="")
+        out = Path(tempfile.mkdtemp()) / "t.docx"
+        build_transcript_docx(chat, out)
+        doc = Document(str(out))
+        dates = [p.text for p in doc.paragraphs if p.text.startswith("■")]
+        self.assertEqual(dates, ["■ 2026年02月11日", "■ 2026年04月24日",
+                                 "■ 2026年08月03日", "■ 2026年08月05日"])
+        joined = "\n".join(p.text for p in doc.paragraphs)
+        # None 前向填充 → 跟在 08-05 的消息之后（同日段内）
+        self.assertGreater(joined.index("无时间戳跟随"),
+                           joined.index("八月消息B"))
+
     def test_image_message_without_file(self):
         """图片消息但文件不存在 → 不嵌入也不崩。"""
         msgs = [Message(kind="image", img_path="Z:/不存在/x.png", side="left",

@@ -111,6 +111,24 @@ def _ocr_image_notes(img_path: str, max_lines: int = 10) -> list[str]:
         return []
 
 
+def _chrono_sorted(messages: list) -> list:
+    """渲染序 = 时间戳稳定排序（无时间戳项前向填充，贴住前一条不飘走）。
+
+    实测（2026-09-06 赵AI事务所 4142 条）：屏幕序有两类乱序——日界附近
+    日期标签 ±1 天漂移（分隔 08-06 → 08-05 倒退），上滚期先见的沉寂段
+    （2 月/4 月 21 条）整块错位到 8 月中旬。内容完整但阅读序断裂；
+    稳定排序后日期分隔单调，None 时间戳沿用前条时间保持原相对位。
+    """
+    from datetime import datetime as _dt
+    keys, last = [], _dt.min
+    for m in messages:
+        if m.timestamp:
+            last = m.timestamp
+        keys.append(last)
+    order = sorted(range(len(messages)), key=lambda i: keys[i])
+    return [messages[i] for i in order]
+
+
 def build_transcript_docx(chat: Chat, out_path: Path,
                           time_window: str = "",
                           max_images: int = 50,
@@ -152,7 +170,7 @@ def build_transcript_docx(chat: Chat, out_path: Path,
     # ---------- 正文 ----------
     last_date = ""
     embedded = 0
-    for m in chat.messages:
+    for m in _chrono_sorted(chat.messages):
         # 日期分隔（消息有解析时间时按解析日期；否则沿用上一日期）
         dstr = m.timestamp.strftime("%Y年%m月%d日") if m.timestamp else ""
         if dstr and dstr != last_date:
