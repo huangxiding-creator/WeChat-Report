@@ -414,7 +414,7 @@ def _start_render_worker(queue_dir: Path):
     _revive_err_jobs(queue_dir)
     log = open(queue_dir / "_render_worker.log", "a", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, "-X", "utf8", "-m", "wcr.report.render_worker",
+        [sys.executable, "-u", "-X", "utf8", "-m", "wcr.report.render_worker",
          str(queue_dir)],
         stdout=log, stderr=subprocess.STDOUT)
     return proc, log
