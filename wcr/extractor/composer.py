@@ -52,6 +52,10 @@ class MessageComposer:
         self.last_parsed_time: Optional[datetime] = None
         self.speaker_attribution = speaker_attribution
         self.screen_count = 0
+        # 逐屏时间标签（{屏号: [{text, cy}, ...]}）：随检查点持久化——
+        # 断点恢复后重新回填日期必须用**采集当时**的标签，否则全部消息
+        # 会被盖上恢复时刻那屏的日期（实测 502 条全变 09-04）
+        self.time_labels: dict[int, list[dict]] = {}
 
     # ------------------------------------------------------------ dedup
     DEDUP_WINDOW = 3   # 屏；相邻屏重叠去重窗口
@@ -221,6 +225,7 @@ class MessageComposer:
             "screen_count": self.screen_count,
             "seen": {f"{k[0]}|{k[1]}": v for k, v in self.seen.items()},
             "messages": [m.to_dict() for m in self.messages],
+            "time_labels": {str(k): v for k, v in self.time_labels.items()},
             "last_parsed_time": (self.last_parsed_time.strftime("%Y-%m-%d %H:%M:%S")
                                  if self.last_parsed_time else ""),
         }
@@ -245,6 +250,7 @@ class MessageComposer:
                 except ValueError:
                     continue
         self.messages = [Message.from_dict(d) for d in payload.get("messages", [])]
+        self.time_labels = {int(k): v for k, v in payload.get("time_labels", {}).items()}
         if payload.get("last_parsed_time"):
             try:
                 self.last_parsed_time = datetime.strptime(payload["last_parsed_time"],

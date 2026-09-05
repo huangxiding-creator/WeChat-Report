@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+import numpy as np
+
 from ..models import Chat
 from .base import BaseExtractor
 from .bubbles import ImageBubbleDetector
@@ -112,12 +114,17 @@ class VisualExtractor(BaseExtractor):
                                 input_zone_ratio=self.guard.input_zone_ratio)
         composer = MessageComposer(self.speaker_attribution)
 
-        # 断点恢复
+        # 断点恢复（先校验面板位置：微信重开会话/新消息涌入会把面板拉回
+        # 底部，断点位置已失——此时续采会跳过中段消息，宁可放弃断点全量重采）
         ckpt = self.output_dir / "checkpoints" / f"{_slug(chat_name)}.json"
         resumed = False
         if self.checkpoint_enabled and composer.load_checkpoint(ckpt):
-            resumed = True
-            say(f"   ↩ 断点恢复：已有 {len(composer.messages)} 条")
+            if self._resume_position_valid(cap, shot_dir, composer.screen_count):
+                resumed = True
+                say(f"   ↩ 断点恢复：已有 {len(composer.messages)} 条")
+            else:
+                say("   ↩ 断点位置已失效（面板被移动）→ 放弃断点，全量重采")
+                composer = MessageComposer(self.speaker_attribution)
 
         # 5. 向上滚动（时间窗模式：逐屏探测，见到早于 start 的标签即停）
         if not resumed:
@@ -128,8 +135,7 @@ class VisualExtractor(BaseExtractor):
             else:
                 self._scroll_up_with_window(scroller, cap, ocr, start_dt, say)
 
-        # 6. 向下逐屏采集
-        time_labels_by_screen: dict[int, list[dict]] = {}
+        # 6. 向下逐屏采集（时间标签记在 composer 上，随检查点持久化）
         screen_idx = 0 if not resumed else composer.screen_count
         total_added = 0
         zero_add_screens = 0
@@ -144,7 +150,7 @@ class VisualExtractor(BaseExtractor):
             msg_texts = [t for t in ocr_texts if not is_time_label(t["text"])]
             voice_marks, msg_texts = self.detector.split_voice_marks(msg_texts)
             img_rects = self.detector.detect(img, ocr_texts)
-            time_labels_by_screen[screen_idx] = time_texts
+            composer.time_labels[screen_idx] = time_texts
 
             added = composer.add_screen(
                 screen_idx, msg_texts, img_rects, voice_marks, img,
@@ -188,7 +194,7 @@ class VisualExtractor(BaseExtractor):
                 break
 
         # 7. 收尾：时间回填 + 排序 + 过滤 + 持久化
-        composer.assign_times(time_labels_by_screen)
+        composer.assign_times(composer.time_labels)
         messages = composer.sort()
         # 实际覆盖区间：按过滤前的全部时间戳算（窗口外全部滤掉时仍能看到
         # 该聊天缓存的真实时间范围，如 "2024-10-12 ~ 2024-10-24"）
@@ -219,6 +225,39 @@ class VisualExtractor(BaseExtractor):
         return chat
 
     # ------------------------------------------------------------ helpers
+    @staticmethod
+    def _frames_relate(a, b) -> float:
+        """两帧粗略相关性（0~1）：32×32 灰度归一化内积。同区域视图高相关，
+        不同区域（如断点位置丢失后面板已回到底部）低相关。"""
+        import cv2
+
+        if a is None or b is None or a.shape[:2] != b.shape[:2] and (
+                a.size == 0 or b.size == 0):
+            return 0.0
+        try:
+            ga = cv2.resize(cv2.cvtColor(a, cv2.COLOR_BGR2GRAY), (32, 32),
+                            interpolation=cv2.INTER_AREA).astype("float32")
+            gb = cv2.resize(cv2.cvtColor(b, cv2.COLOR_BGR2GRAY), (32, 32),
+                            interpolation=cv2.INTER_AREA).astype("float32")
+        except cv2.error:
+            return 0.0
+        ga -= ga.mean()
+        gb -= gb.mean()
+        denom = float((np.sqrt((ga * ga).sum()) * np.sqrt((gb * gb).sum())))
+        return float((ga * gb).sum() / denom) if denom > 1e-6 else 0.0
+
+    def _resume_position_valid(self, cap: ScreenCapture, shot_dir: Path,
+                               screen_count: int) -> bool:
+        """断点位置校验：当前帧与检查点末屏截图仍高相关才算位置未丢。"""
+        if screen_count <= 0:
+            return False
+        from .capture import imread_png
+
+        last = imread_png(shot_dir / f"screen{screen_count - 1:04d}.png")
+        if last is None:
+            return False       # 末屏截图缺失（keep_screenshots=False/被清理）
+        return self._frames_relate(cap.grab(), last) >= 0.6
+
     def _scroll_up_with_window(self, scroller: ChatScroller, cap: ScreenCapture,
                                ocr: OCRParser, start_dt, say) -> None:
         """向上滚动；时间窗模式下周期 OCR 探测最早时间标签。

@@ -726,5 +726,59 @@ class TestFailSafeStartGate(unittest.TestCase):
         self.assertEqual(fake_time.sleep.call_count, 2)
 
 
+class TestCheckpointTimeLabels(unittest.TestCase):
+    """断点恢复质量：时间标签必须随检查点持久化（实测 502 条恢复消息
+    全被盖上恢复时刻那屏的 09-04 日期）。"""
+
+    def test_roundtrip(self):
+        import tempfile
+        from pathlib import Path
+        from wcr.extractor.composer import MessageComposer
+
+        c1 = MessageComposer(speaker_attribution=False)
+        c1.time_labels = {0: [{"text": "昨天 08:30", "cy": 30}],
+                          1: [{"text": "星期三", "cy": 28}]}
+        c1.screen_count = 2
+        c1.messages = [Message(kind="text", text="收到", side="left",
+                               timestamp=None)]
+        p = Path(tempfile.mkdtemp()) / "ckpt.json"
+        c1.save_checkpoint(p)
+
+        c2 = MessageComposer(speaker_attribution=False)
+        self.assertTrue(c2.load_checkpoint(p))
+        self.assertEqual(c2.time_labels, c1.time_labels)
+        self.assertEqual(c2.screen_count, 2)
+
+
+class TestFramesRelate(unittest.TestCase):
+    """断点位置校验：同区域视图高相关、不同区域低相关。"""
+
+    def _img(self, seed):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        return rng.integers(0, 255, (482, 542, 3), dtype=np.uint8)
+
+    def test_same_scene_high(self):
+        from wcr.extractor.visual import VisualExtractor
+        import numpy as np
+        base = np.tile(np.linspace(0, 255, 482, dtype=np.uint8)[:, None, None],
+                       (1, 542, 3))
+        noise = self._img(7).astype(np.int16) * 0
+        a = np.clip(base.astype(np.int16) + self._img(1).astype(np.int16) // 16,
+                    0, 255).astype(np.uint8)
+        b = np.clip(base.astype(np.int16) + self._img(2).astype(np.int16) // 16,
+                    0, 255).astype(np.uint8)
+        self.assertGreaterEqual(VisualExtractor._frames_relate(a, b), 0.6)
+
+    def test_different_scene_low(self):
+        from wcr.extractor.visual import VisualExtractor
+        self.assertLess(VisualExtractor._frames_relate(self._img(3),
+                                                       self._img(4)), 0.6)
+
+    def test_none_or_broken(self):
+        from wcr.extractor.visual import VisualExtractor
+        self.assertEqual(VisualExtractor._frames_relate(None, self._img(5)), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
