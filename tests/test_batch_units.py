@@ -885,6 +885,38 @@ class TestPrefilterTailCut(unittest.TestCase):
         self.assertEqual(out, ["今天活跃", "三月聊过"])
 
 
+class TestProgressKeyVariantMatch(unittest.TestCase):
+    """断点跳过的变体容错：重启后枚举名换读法（实测「2028届八年级14班」
+    →「2028届八年级1」）不能把已完成聊天整个重爬。"""
+
+    def test_exact(self):
+        from wcr.batch import _progress_key
+        progress = {"2028届八年级14班": {"messages": 2314}}
+        self.assertEqual(_progress_key("2028届八年级14班", progress),
+                         "2028届八年级14班")
+
+    def test_truncated_variant_hits(self):
+        from wcr.batch import _progress_key
+        progress = {"2028届八年级14班": {"messages": 2314}}
+        self.assertEqual(_progress_key("2028届八年级1", progress),
+                         "2028届八年级14班")
+
+    def test_ocr_variant_hits(self):
+        from wcr.batch import _progress_key
+        progress = {"赵A事务所": {"messages": 10}}
+        self.assertEqual(_progress_key("赵嫣嫣AI事务所", progress), "赵A事务所")
+
+    def test_unrelated_miss(self):
+        from wcr.batch import _progress_key
+        progress = {"黄藏寺项目值班值守": {"messages": 671}}
+        self.assertIsNone(_progress_key("黄藏寺现场处置组", progress))
+        self.assertIsNone(_progress_key("河美恬园8号楼业主群", progress))
+
+    def test_empty(self):
+        from wcr.batch import _progress_key
+        self.assertIsNone(_progress_key("任意", {}))
+
+
 class TestMatchOnly(unittest.TestCase):
     """定向名单：--only 请求名可与枚举名互为变体/互含（请求常更短）。"""
 

@@ -132,9 +132,11 @@ class BatchExporter:
         # 2. 逐个导出
         t0 = time.monotonic()
         for i, name in enumerate(names, 1):
-            if name in progress:
+            done_key = _progress_key(name, progress)
+            if done_key is not None:
                 res.skipped += 1
-                self.say(f"⏭ [{i}/{res.total}] 「{name}」已完成（断点跳过）")
+                self.say(f"⏭ [{i}/{res.total}] 「{name}」已完成"
+                         f"（断点跳过：{done_key}）")
                 continue
             self.say(f"\n───── [{i}/{res.total}] 「{name}」 ─────")
             ok = False
@@ -314,6 +316,23 @@ def _window_cutoff(time_window: str):
     from .extractor.timelabels import parse_window
     start_dt, _ = parse_window(time_window or "", now=datetime.now())
     return start_dt.date() if start_dt else None
+
+
+def _progress_key(name: str, progress: dict) -> Optional[str]:
+    """断点键匹配：先精确，再变体。
+
+    枚举名逐轮是 OCR 变体——2026-09-06 实测重启后「2028届八年级14班」
+    被读成截断的「2028届八年级1」，精确匹配失配导致已完成 2.5h 的聊天
+    被整个重爬。变体判据与枚举去重同源（name_variant），误跳风险与
+    枚举误合并同界；返回命中的进度键（供审计），未命中返回 None。
+    """
+    if name in progress:
+        return name
+    from .extractor.navigator import name_variant
+    for k in progress:
+        if name_variant(name, k):
+            return k
+    return None
 
 
 def _match_only(names: list[str], only: list[str]) -> list[str]:
