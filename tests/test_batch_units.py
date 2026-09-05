@@ -780,5 +780,27 @@ class TestFramesRelate(unittest.TestCase):
         self.assertEqual(VisualExtractor._frames_relate(None, self._img(5)), 0.0)
 
 
+class TestPrefilterTailCut(unittest.TestCase):
+    """裁尾规则：列表按日期排序，最后一个"明确窗内"戳之后的项整段跳过。"""
+
+    def test_tail_cut(self):
+        from wcr.batch import BatchExporter
+        be = BatchExporter(None)
+        names = ["A活跃", "B无戳", "C旧置顶", "D去年12月", "E无戳老", "F更老无戳"]
+        stamps = {"A活跃": "昨天", "B无戳": "", "C旧置顶": "2024/10",
+                  "D去年12月": "2025/12/18", "E无戳老": "", "F更老无戳": ""}
+        out = be._prefilter_window(names, stamps, "365d")
+        # C 被逐名过滤（2024 置顶老聊天）；D 之后再无窗内戳 → E/F 裁尾
+        self.assertEqual(out, ["A活跃", "B无戳", "D去年12月"])
+
+    def test_no_inwindow_stamp_no_cut(self):
+        """无任何明确窗内戳 → 不裁尾（保守，全部保留交采集兜底）。"""
+        from wcr.batch import BatchExporter
+        be = BatchExporter(None)
+        out = be._prefilter_window(["A", "B", "C"], {"A": "昨天", "B": "8-29",
+                                                     "C": "2024/10"}, "365d")
+        self.assertEqual(out, ["A", "B"])    # 仅逐名过滤 C，B 无年份戳保留
+
+
 if __name__ == "__main__":
     unittest.main()

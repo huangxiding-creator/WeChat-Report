@@ -237,9 +237,21 @@ class BatchExporter:
         for n in names:
             older = stamp_older_than(_stamp_for(n), cutoff)
             (dropped if older else kept).append(n)
+        # 裁尾规则：列表严格按最近活跃排序——最后一个"明确在窗内"的戳
+        # 之后的全部项都必然更旧。老聊天右列 2024/* 淡灰小字戳在快速滚动
+        # 下漏采严重（实测 556 戳仅 9 个年份戳，逐名过滤只滤掉个位数），
+        # 靠排序性质可整段裁掉数百个窗外老聊天（全量跑省 7~10 小时）。
+        last_in = -1
+        for idx, n in enumerate(kept):
+            if stamp_older_than(_stamp_for(n), cutoff) is False:
+                last_in = idx
+        if 0 <= last_in < len(kept) - 1:
+            n_tail = len(kept) - 1 - last_in
+            kept = kept[:last_in + 1]
+            self.say(f"   裁尾：最后窗内戳之后 {n_tail} 项按列表排序跳过")
         if dropped:
             self.say(f"   窗预过滤：{len(names)} → {len(kept)}"
-                     f"（戳明确早于 {cutoff} 的 {len(dropped)} 项跳过）")
+                     f"（戳明确早于 {cutoff} 的 {len(dropped)} 项 + 裁尾跳过）")
         return kept
 
     def _skip_names(self) -> tuple[str, ...]:
