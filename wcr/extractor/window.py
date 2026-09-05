@@ -59,7 +59,15 @@ class WeChatWindow:
                 w for w in candidates
                 if not any(s in w.title.lower() for s in self._EXCLUDE_SUBSTR)
             ]
-            pool = filtered or candidates
+            # 排除后为空 = 只剩 VS Code 等被排除窗口（2026-09-05 实测：微信
+            # 托盘最小化时 pygetwindow 枚举不到，回退到未过滤候选抓错了窗口）
+            pool = filtered
+        if not pool:
+            raise RuntimeError(
+                "微信主窗口当前不可见（可能已最小化到托盘），且候选里只剩被"
+                "排除的窗口（如标题含 WeChat-Report 的 VS Code）。请点开微信"
+                "主窗口后重试。"
+            )
 
         self.win = max(pool, key=lambda w: w.width * w.height)
         self.rect = (self.win.left, self.win.top, self.win.width, self.win.height)

@@ -942,5 +942,46 @@ class TestScrollUpDynamicTop(unittest.TestCase):
         self.assertNotIn("动态加载两轮验证均无变化", joined)
 
 
+class TestWindowFindStrict(unittest.TestCase):
+    """窗口定位宁缺毋滥：微信托盘最小化时不得回退抓 VS Code
+    （标题含 WeChat-Report，2026-09-05 实测抓错窗口后险些在 VS Code 里滚轮）。"""
+
+    class _W:
+        def __init__(self, title, l=0, t=0, w=900, h=700):
+            self.title, self.left, self.top = title, l, t
+            self.width, self.height = w, h
+
+    def _find(self, windows):
+        import sys
+        from unittest import mock
+        from wcr.extractor.window import WeChatWindow
+
+        fake_gw = mock.MagicMock()
+
+        def by_title(hint):
+            return [w for w in windows if hint in w.title]
+
+        fake_gw.getWindowsWithTitle.side_effect = by_title
+        with mock.patch.dict(sys.modules, {"pygetwindow": fake_gw}):
+            return WeChatWindow().find()
+
+    def test_prefers_exact_wechat(self):
+        vs = self._W("微信聊天记录报告工具 - WeChat-Report - Visual Studio Code")
+        wx = self._W("微信", 2, 22, 896, 704)
+        win = self._find([vs, wx])
+        self.assertEqual(win.rect, (2, 22, 896, 704))
+
+    def test_only_vscode_raises(self):
+        """微信不可见时：只剩被排除窗口 → 报错，绝不抓错。"""
+        vs = self._W("微信聊天记录报告工具 - WeChat-Report - Visual Studio Code")
+        with self.assertRaises(RuntimeError):
+            self._find([vs])
+
+    def test_excluded_subtitle_still_raises(self):
+        """无精确匹配且候选全被排除 → 报错（旧行为会回退抓错）。"""
+        with self.assertRaises(RuntimeError):
+            self._find([self._W("微信聊天记录.txt - 记事本")])
+
+
 if __name__ == "__main__":
     unittest.main()
