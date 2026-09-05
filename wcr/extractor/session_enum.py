@@ -295,11 +295,33 @@ class SessionEnumerator:
         bottom_verify = 0   # 底验证次数：连续零新增 ≠ 到底（中途冻结甄别）
         self.say("🗂 枚举会话列表（滚动 + OCR）…")
 
-        # 先回到列表顶部（距离制 + 搜索框锚点确认）
-        from .navigator import fuzzy_same, scroll_session_list_to_top
-        scroll_session_list_to_top(
-            self.win, self.guard,
-            expected_items=self.max_rounds * 148 // 65)
+        # 先回到列表顶部（距离制 + 搜索框锚点确认）。返回值必须接住：
+        # 回顶失败直接开扫会漏掉整个顶部段——2026-09-06 实测重启后从中段
+        # 起扫（首名=星期三/四戳的中段会话，当天 02:48 活跃的会话反在其
+        # 后才发现，日期排序下自相矛盾），当晚活跃的顶部 6+ 会话全漏且
+        # 无任何告警。处置：冲屏破冻复验 → 整轮重滚一次 → 仍失败则响亮
+        # 告警后保守继续（人工介入信号）
+        from .navigator import (_confirm_list_top, fuzzy_same,
+                                scroll_session_list,
+                                scroll_session_list_to_top)
+        if not scroll_session_list_to_top(
+                self.win, self.guard,
+                expected_items=self.max_rounds * 148 // 65):
+            self.say("   ⚠ 回顶未确认，冲屏破冻后复验 …")
+            confirmed = False
+            for attempt in range(2):
+                time.sleep(3.0)
+                scroll_session_list(self.win, self.guard, +120, 24, pause=0.1)
+                time.sleep(1.0)
+                if _confirm_list_top(self.win, cap, ocr, self.guard):
+                    self.say(f"   ✔ 回顶补确认成功（第 {attempt + 1} 次冲屏）")
+                    confirmed = True
+                    break
+            if not confirmed and not scroll_session_list_to_top(
+                    self.win, self.guard,
+                    expected_items=self.max_rounds * 148 // 65):
+                self.say("   ✗ 回顶两轮未确认：顶部段有漏采风险，"
+                         "如结果缺当晚活跃会话需重跑")
 
         for rnd in range(self.max_rounds):
             # 一次推理分级阈值：名称用 0.4（干净），采戳用 0.28（老聊天

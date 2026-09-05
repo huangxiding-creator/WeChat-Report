@@ -607,11 +607,19 @@ class TestEnumFreezeRobustBottom(unittest.TestCase):
         return [{"text": n, "cx": 120, "cy": 40 + 65 * i, "score": 0.9}
                 for i, n in enumerate(names_)]
 
-    def _run(self, screens, max_rounds=24):
+    def _run(self, screens, max_rounds=24, roll_results=None,
+             confirm_results=None):
         import sys
         from unittest import mock
         import wcr.extractor.session_enum as se
 
+        roll_mock = mock.MagicMock()
+        if roll_results is not None:
+            roll_mock.side_effect = list(roll_results)
+        confirm_mock = mock.MagicMock()
+        if confirm_results is not None:
+            confirm_mock.side_effect = list(confirm_results)
+        burst_mock = mock.MagicMock()
         script = list(screens)
 
         class _FakeOCR:
@@ -651,7 +659,11 @@ class TestEnumFreezeRobustBottom(unittest.TestCase):
         with mock.patch.object(se, "ScreenCapture", _FakeCap), \
                 mock.patch.object(se, "OCRParser", _FakeOCR), \
                 mock.patch("wcr.extractor.navigator."
-                           "scroll_session_list_to_top"), \
+                           "scroll_session_list_to_top", roll_mock), \
+                mock.patch("wcr.extractor.navigator."
+                           "_confirm_list_top", confirm_mock), \
+                mock.patch("wcr.extractor.navigator."
+                           "scroll_session_list", burst_mock), \
                 mock.patch("time.sleep"), \
                 mock.patch.dict(sys.modules, {"pyautogui": mock.MagicMock()}):
             names = en.enumerate()
@@ -681,6 +693,27 @@ class TestEnumFreezeRobustBottom(unittest.TestCase):
         self.assertIn("（第 20 轮）", joined)      # 恢复后一直枚举到预算用尽
         self.assertNotIn("已到底", joined)        # 冻结未被误判为到底
         self.assertIn("大力滚动验证 1/3", joined)
+
+    def test_roll_fail_burst_rescue(self):
+        """回顶失败 → 冲屏破冻后补确认成功：不整轮重滚，扫描正常开始。"""
+        ab = self._screen("会话A", "会话B")
+        names, said = self._run([ab] * 8, roll_results=[False],
+                                confirm_results=[True])
+        joined = "\n".join(said)
+        self.assertIn("回顶未确认", joined)
+        self.assertIn("回顶补确认成功", joined)
+        self.assertNotIn("回顶两轮未确认", joined)
+        self.assertEqual(names, ["会话A", "会话B"])
+
+    def test_roll_fail_double_resort_loud(self):
+        """回顶失败 → 两次冲屏 + 整轮重滚均失败：响亮告警（✗ 行）
+        后保守继续扫描——沉默漏采顶部段的事故不再无声。"""
+        ab = self._screen("会话A", "会话B")
+        names, said = self._run([ab] * 8, roll_results=[False, False],
+                                confirm_results=[False, False])
+        joined = "\n".join(said)
+        self.assertIn("回顶两轮未确认", joined)
+        self.assertEqual(names, ["会话A", "会话B"])   # 保守继续不中断
 
     def test_real_bottom_needs_three_verifies(self):
         """真到底：3 次大力滚动验证均无新增才认底。"""
