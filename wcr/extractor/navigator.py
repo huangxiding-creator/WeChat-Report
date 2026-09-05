@@ -73,10 +73,20 @@ def _confirm_list_top(win, cap, ocr, guard: Optional[SafetyGuard] = None) -> boo
     枚举起点因此错过整个列表上部（试点 8 实证）。
     到顶铁证：再向上滚**行名集合纹丝不动**（真顶无处可滚）；
     连续 2 次上推集合不变才确认（快速连滚吞档风险下取双确认）。
+    过顶态（2026-09-06 实测）：列表可越过锚点位继续上滑把搜索头整个
+    折叠出视野——首行顶到区顶、锚点消失，确认永不成立、回顶空磨到
+    预算耗尽。处置：锚点不可见时小步**下退** 2 档再验——过顶态一退
+    即露出锚点（顺带自愈回锚点位），中段滚动退多少都不会出现锚点，
+    以此区分，不引入中段假阳性。
     """
     for _ in range(2):
         if not at_list_top(ocr.parse(cap.grab())):
-            return False
+            if guard is None:
+                return False   # 无护栏（单测桩）无法滚动验证
+            scroll_session_list(win, guard, -120, 2, pause=0.15)
+            time.sleep(0.4)
+            if not at_list_top(ocr.parse(cap.grab())):
+                return False
         time.sleep(0.35)
     if guard is None:
         return True   # 无护栏（单测桩）无法滚动验证，退化为双帧判据

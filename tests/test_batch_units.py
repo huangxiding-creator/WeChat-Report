@@ -233,6 +233,78 @@ class TestAtListTop(unittest.TestCase):
         self.assertTrue(at_list_top(texts2))
 
 
+class TestConfirmListTopOverTop(unittest.TestCase):
+    """过顶态自愈：锚点滚出视野（首行顶到区顶）时下退 2 档露出锚点 →
+    确认成功；中段滚动下退不会出现锚点 → 确认失败（不引入中段假阳性）。"""
+
+    ANCHOR_TOP = [
+        TestAtListTop.ocr("搜系", 4),
+        TestAtListTop.ocr("黄藏寺项目值班值守", 47),
+        TestAtListTop.ocr("22:07", 47, cx=220),
+        TestAtListTop.ocr("赵AI事务所", 112),
+        TestAtListTop.ocr("昨天22:28", 112, cx=220),
+        TestAtListTop.ocr("总包之声UP主", 177),
+        TestAtListTop.ocr("昨天20:56", 177, cx=220),
+        TestAtListTop.ocr("河美恬园8号楼业主群", 242),
+    ]
+    OVER_TOP = [
+        TestAtListTop.ocr("2028届八年级1", 6),
+        TestAtListTop.ocr("昨天23:00", 6, cx=220),
+    ] + ANCHOR_TOP[1:]
+    MID_LIST = [
+        TestAtListTop.ocr("新疆兵团设计院总", 40),
+        TestAtListTop.ocr("星期四", 40, cx=220),
+        TestAtListTop.ocr("罗永祥平高电气", 105),
+    ]
+
+    def _run(self, script):
+        from unittest import mock
+        from wcr.extractor.navigator import _confirm_list_top
+
+        class _OCR:
+            def __init__(self):
+                self._i = 0
+
+            def parse(self, _img):
+                i = min(self._i, len(script) - 1)
+                self._i += 1
+                return script[i]
+
+        class _Cap:
+            def grab(self):
+                return None
+
+        class _Win:
+            rect = (0, 0, 900, 700)
+
+            def session_list_rect(self):
+                return (66, 78, 248, 600)
+
+        class _Guard:
+            def check_scroll(self, *_a):
+                pass
+
+        scrolls: list[tuple] = []
+        with mock.patch("wcr.extractor.navigator.scroll_session_list",
+                        side_effect=lambda *a, **k: scrolls.append(a)):
+            ok = _confirm_list_top(_Win(), _Cap(), _OCR(), _Guard())
+        return ok, scrolls
+
+    def test_overtop_heals_and_confirms(self):
+        """过顶帧 → 下退露出锚点 → 双帧+上推验证全过 → 确认。"""
+        script = [self.OVER_TOP] + [self.ANCHOR_TOP] * 5
+        ok, scrolls = self._run(script)
+        self.assertTrue(ok)
+        self.assertEqual(scrolls[0][2], -120)   # 第一个滚动是过顶自愈下退
+        self.assertEqual(scrolls[0][3], 2)      # 小步 2 档
+
+    def test_midlist_stays_rejected(self):
+        """中段帧：下退后仍无锚点 → 确认失败（不引入假阳性）。"""
+        ok, scrolls = self._run([self.MID_LIST] * 4)
+        self.assertFalse(ok)
+        self.assertEqual(scrolls[0][2], -120)
+
+
 class TestScaledScanRounds(unittest.TestCase):
     def test_unknown_uses_base(self):
         self.assertEqual(scaled_scan_rounds(0), 60)
