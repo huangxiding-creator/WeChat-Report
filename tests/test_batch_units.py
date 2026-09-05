@@ -855,5 +855,92 @@ class TestMatchOnly(unittest.TestCase):
                          ["处置组", "值班组"])
 
 
+class TestScrollUpDynamicTop(unittest.TestCase):
+    """上滚到顶甄别：文本稳定 3 次可能只是动态加载间隙（用户实测指正），
+    必须大冲复验——验证发现新内容则继续上滚，两轮无变化才认顶。"""
+
+    def _run(self, script, start_dt):
+        """script: 每次 ocr.parse 返回的文本列表序列。返回 (says, wheel_log)。"""
+        from datetime import datetime
+        from unittest import mock
+        from wcr.extractor.scroller import ChatScroller
+        from wcr.extractor.visual import VisualExtractor
+
+        wheel_log: list[int] = []
+
+        class _Scroller:
+            scroll_pause = 0
+            scroll_step = 15
+            earliest_time_in_texts = staticmethod(
+                ChatScroller.earliest_time_in_texts)
+
+            def _wheel(self, n):
+                wheel_log.append(n)
+
+        class _OCR:
+            def __init__(self):
+                self._i = 0
+
+            def parse(self, _img):
+                i = min(self._i, len(script) - 1)
+                self._i += 1
+                return script[i]
+
+        class _Cap:
+            def grab(self):
+                return None
+
+        says: list[str] = []
+        ext = VisualExtractor(stable_frames=3, scrollup_time_budget=10 ** 9)
+        with mock.patch("time.sleep"), \
+                mock.patch("time.monotonic",
+                           side_effect=range(0, 10 ** 6, 1)):
+            ext._scroll_up_with_window(_Scroller(), _Cap(), _OCR(),
+                                       start_dt, says.append)
+        return says, wheel_log
+
+    @staticmethod
+    def _screen(texts):
+        return [{"text": t, "cx": 100, "cy": 40 + 30 * i, "score": 0.9}
+                for i, t in enumerate(texts)]
+
+    def test_fetch_pause_not_top(self):
+        """稳定 3 次后验证发现新内容（动态加载恢复）→ 继续上滚到窗起点。"""
+        from datetime import datetime
+        a = self._screen(["张三：收到", "李四：好的"])
+        # 4 次相同 → 稳定 3 次触发验证；验证第 1 轮 OCR 到更早的日期标签
+        old = self._screen(["2025年8月1日 09:00", "王五：开工令已发"])
+        says, wheel = self._run(
+            [a, a, a, a, old, old], datetime(2025, 9, 6))
+        joined = "\n".join(says)
+        self.assertIn("动态加载恢复", joined)      # 验证识破加载间隙
+        self.assertIn("到达时间窗起点", joined)    # 继续滚到 2025-08-01 停
+        self.assertNotIn("已滚动到聊天顶部", joined)   # 没有误判顶
+        self.assertIn(15 * 24, wheel)              # 大冲 24 档确实发生
+
+    def test_true_top_accepted(self):
+        """真顶：稳定 3 次 + 两轮大冲验证均无变化 → 认顶。"""
+        from datetime import datetime
+        a = self._screen(["张三：收到"])
+        script = [a] * 12
+        says, wheel = self._run(script, datetime(2025, 9, 6))
+        joined = "\n".join(says)
+        self.assertIn("动态加载两轮验证均无变化", joined)
+        self.assertEqual(wheel.count(15 * 24), 2)   # 两轮验证大冲
+
+    def test_verify_empty_ocr_not_top(self):
+        """验证时 OCR 为空 → 不认顶，继续上滚（此处随后滚到窗起点收尾）。"""
+        from datetime import datetime
+        a = self._screen(["张三：收到"])
+        empty: list[dict] = []
+        old = self._screen(["2025年8月1日 09:00", "王五：开工令已发"])
+        says, _ = self._run([a, a, a, a, empty, old, old],
+                            datetime(2025, 9, 6))
+        joined = "\n".join(says)
+        self.assertIn("OCR 为空", joined)           # 空验证没有误认顶
+        self.assertIn("到达时间窗起点", joined)       # 继续上滚至窗起点
+        self.assertNotIn("动态加载两轮验证均无变化", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

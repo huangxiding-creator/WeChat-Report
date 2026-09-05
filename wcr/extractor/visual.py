@@ -269,13 +269,19 @@ class VisualExtractor(BaseExtractor):
             scroller.scroll_to_top()
             return
         say(f"⏫ 向上滚动至时间窗起点 {start_dt:%Y-%m-%d} …")
-        probe_every = 4          # 每 4 次大滚动 OCR 一次（控制开销）
+        probe_every = 6          # 每 6 次大滚动 OCR 一次（OCR 是探针主要
+                                  # 开销，加密滚轮提高推进速度）
         empty_probes = 0         # 连续 OCR 到 0 个文本块 → 采集区异常
         text_stable = 0          # 连续 OCR 文本集完全相同 → 已到顶（防 GIF 动图误判）
         last_seen = None
         prev_texts: frozenset | None = None
-        deadline = time.monotonic() + self.scrollup_time_budget
-        for round_ in range(self.scroll_attempts):
+        # 预算语义：<=0 = 不限时（用户要求：加载是动态的，滚到窗起点或
+        # 验证过的真顶为止）；>0 = 墙钟预算兜底
+        no_budget = self.scrollup_time_budget <= 0
+        deadline = (None if no_budget
+                    else time.monotonic() + self.scrollup_time_budget)
+        rounds_cap = (100_000 if no_budget else self.scroll_attempts)
+        for round_ in range(rounds_cap):
             for _ in range(probe_every):
                 scroller._wheel(scroller.scroll_step * 8)
                 time.sleep(self.scroll_pause)
@@ -302,15 +308,41 @@ class VisualExtractor(BaseExtractor):
                 text_stable = text_stable + 1 if cur == prev_texts else 0
                 prev_texts = cur
                 if text_stable >= self.stable_frames:
-                    say("   ✔ 已滚动到聊天顶部（文本连续无变化），从顶部开始采集")
-                    return
+                    # 动态加载甄别（用户实测指正：聊天记录上滚会按需从服务器
+                    # 续载，稳定 3 次可能只是加载间隙）——休 3s 大冲 24 档再
+                    # OCR，两轮验证；内容有变 = 更早历史正在加载，继续上滚
+                    if self._top_verify_stable(scroller, cap, ocr, cur, say):
+                        say("   ✔ 已滚动到聊天顶部（动态加载两轮验证均无变化），从顶部开始采集")
+                        return
+                    text_stable = 0
+                    prev_texts = None
             if round_ % 10 == 0 and round_:
                 tip = f"{last_seen:%Y-%m-%d %H:%M}" if last_seen else "尚无"
                 say(f"   上滚第 {round_ * probe_every} 轮，最早见到 {tip}")
-            if time.monotonic() > deadline:
+            if deadline is not None and time.monotonic() > deadline:
                 say(f"   ⚠ 上滚超过 {int(self.scrollup_time_budget)}s 预算，按现有位置继续采集")
                 return
         say("   ⚠ 未遇到时间窗起点，按现有位置继续采集")
+
+    def _top_verify_stable(self, scroller, cap, ocr, cur: frozenset,
+                           say) -> bool:
+        """到顶二次甄别：初判稳定后大冲两轮复验（防动态加载间隙误判顶）。
+
+        真顶时大冲不产生位移、OCR 文本集不变；加载间隙时休 3s + 24 档
+        大冲会给续载留出时间，内容一变即证伪。
+        """
+        for i in (1, 2):
+            time.sleep(3.0)
+            scroller._wheel(scroller.scroll_step * 24)
+            time.sleep(2.5)
+            texts = ocr.parse(cap.grab())
+            if not texts:
+                say(f"   ↺ 疑似顶第 {i} 轮验证 OCR 为空（非顶），继续上滚")
+                return False
+            if frozenset(t["text"] for t in texts) != cur:
+                say(f"   ↺ 疑似顶第 {i} 轮验证发现新内容（动态加载恢复），继续上滚")
+                return False
+        return True
 
 
 def _slug(name: str) -> str:
