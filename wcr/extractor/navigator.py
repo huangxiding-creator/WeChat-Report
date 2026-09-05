@@ -164,13 +164,16 @@ def match_session(target: str,
 def scroll_session_list_to_top(win, guard: SafetyGuard,
                                expected_items: int = 0,
                                max_iter: int = 0,
-                               time_budget: float = 900.0) -> bool:
+                               time_budget: float = 0.0) -> bool:
     """回顶（距离制 + 搜索框锚点确认，活跃列表上的确定性方案）。
 
     帧稳定判"到顶"在实时刷新的列表上不可靠（假稳定/永不稳定均实测出现），
     改为：按列表长度估算所需滚动次数（8 档/次 ≈ 296px，项高 65px），
     前 70% 距离盲滚（不可能到顶），之后每轮 OCR 检查搜索框锚点，
     锚点出现立即停；超量滚动在顶处空转无害。
+    time_budget<=0 → 按轮数自适应（每轮实耗可达 ~3s：吞档+负载下 900s
+    常量对 500+ 轮长列表不够——2026-09-05 实测 300 轮/903s 超时，列表
+    未到顶即开始枚举会漏采顶部段）。
     返回是否确认到顶（锚点可见）。
     """
     region = win.session_list_rect()
@@ -181,6 +184,8 @@ def scroll_session_list_to_top(win, guard: SafetyGuard,
     est = max(int(expected_items * 65 / 150) * 2 + 8, 60) if expected_items else 60
     if max_iter:
         est = min(est, max_iter)
+    if time_budget <= 0:
+        time_budget = max(900.0, est * 6.0)
     blind = int(est * 0.3)   # est 含 3~4× 吞档悲观余量，实测全程爬升仅需 ~30%；
     # 自 _confirm_list_top 加上推验证后假阳性已可控，可更早开始逐轮检查
     t0 = time.monotonic()
