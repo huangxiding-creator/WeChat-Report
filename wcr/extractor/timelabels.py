@@ -68,8 +68,14 @@ def parse_time_label(text: str, now: Optional[datetime] = None,
 
     m = _FULL.match(t)
     if m:
+        year = int(m["y"])
+        # 年份合理性钳制：OCR 把 "2026年" 误读成 "2005年" 等荒谬年份时
+        # （微信 2011 年才诞生），按乱读处理返回 None——否则不仅上滚探测
+        # 会假性"到达窗起点"，对应消息还会被盖上远古日期后遭窗过滤丢弃
+        if not 2011 <= year <= now.year:
+            return None
         try:
-            return datetime(int(m["y"]), int(m["mo"]), int(m["d"]),
+            return datetime(year, int(m["mo"]), int(m["d"]),
                             int(m["h"] or 0), int(m["mi"] or 0), int(m["s"] or 0))
         except ValueError:
             return None

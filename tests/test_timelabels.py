@@ -27,6 +27,16 @@ class TestTimeLabel(unittest.TestCase):
         self.assertEqual(parse_time_label("2026年8月5日 14:30", NOW),
                          datetime(2026, 8, 5, 14, 30))
 
+    def test_absurd_year_rejected(self):
+        """OCR 把 "2026年7月25日" 误读成 "2005年7月25日" → 按乱读返回 None
+        （否则上滚探测假性到窗起点 + 消息被盖远古日期后遭窗过滤丢弃）。"""
+        self.assertIsNone(parse_time_label("2005年7月25日", NOW))
+        self.assertIsNone(parse_time_label("1999年12月31日", NOW))
+        self.assertIsNone(parse_time_label("2027年1月1日", NOW))   # 未来年也不认
+        # 正常历史年份照常解析（本账号最老会话 2024/06）
+        self.assertEqual(parse_time_label("2024年6月30日", NOW),
+                         datetime(2024, 6, 30))
+
     def test_md_no_year(self):
         self.assertEqual(parse_time_label("3月16日", NOW),
                          datetime(2026, 3, 16))
