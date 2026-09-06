@@ -350,6 +350,50 @@ class WeChatNavigator:
 
         return self.verify_chat_open(chat_name, ocr, say)
 
+    # ------------------------------------------------------------ walk open
+    def click_session(self, chat_name: str,
+                      on_progress: Optional[Callable[[str], None]] = None) -> bool:
+        """顺走模式：当前视口新鲜 OCR 后变体匹配目标，点击并验证标题。
+
+        与 open_chat 的区别：不滚动搜索——列表滚动由调用方顺走控制；
+        每次点击前重新读屏拿新鲜坐标（上一项聊天采集可能耗时 1-2h，
+        期间列表因新消息重排，旧视口坐标会点错对象）。当前视口找不到
+        目标 → 返回 False（调用方记入漏补，最后用 open_chat 搜索兜底）。
+        """
+        from .session_enum import cluster_sessions
+        say = on_progress or (lambda m: log.info(m))
+        ocr = OCRParser(0.4)
+        self.win.activate()
+        region = self.win.session_list_rect()
+        cap = ScreenCapture(region)
+        target = chat_name.strip()
+        for attempt in range(2):
+            texts = ocr.parse(cap.grab())
+            found = cluster_sessions(texts, list_width=region[2])
+            cand = match_session(target, found)
+            if not cand:
+                say(f"   ↕ 「{target}」当前视口未见（列表重排？），转漏补")
+                return False
+            name, y = cand
+            t = next((t for t in texts
+                      if t["text"].strip() == name
+                      or name in t["text"] or t["text"] in name), None)
+            abs_x = region[0] + (t["cx"] if t else 120)
+            abs_y = region[1] + y
+            try:
+                self.guard.check_nav_click(abs_x, abs_y, self.win.rect,
+                                           session_rect=region)
+            except Exception as e:
+                say(f"   ⚠ 「{target}」点击坐标被安全护栏拒绝（{e}），转漏补")
+                return False
+            say(f"   点击会话「{name}」 @ ({abs_x},{abs_y})")
+            self._click(abs_x, abs_y)
+            time.sleep(self.settle_wait)
+            if self.verify_chat_open(target, ocr, say):
+                return True
+            say(f"   ⚠ 第 {attempt + 1} 次点击后未检测到目标聊天标题，重读重试 …")
+        return False
+
     # ------------------------------------------------------------ batch open
     def open_chat(self, chat_name: str,
                   on_progress: Optional[Callable[[str], None]] = None,

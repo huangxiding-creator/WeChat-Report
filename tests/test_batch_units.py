@@ -1250,6 +1250,58 @@ class TestMouseGateState(unittest.TestCase):
         self.assertEqual((g.n_pauses, g.n_resumes), (2, 3))
 
 
+class TestWalkSkipReason(unittest.TestCase):
+    """顺走模式逐项跳过判定（用户 2026-09-06 指示：从上往下逐一提取、
+    最后漏补）。"""
+
+    def _cutoff(self):
+        from datetime import date
+        return date(2026, 1, 1)          # 2026 活跃年
+
+    def _today(self):
+        from datetime import date
+        return date(2026, 9, 6)
+
+    def _reason(self, name, stamps, progress, only=None):
+        from wcr.extractor.session_enum import DEFAULT_SKIP
+        from wcr.batch import _walk_skip_reason
+        return _walk_skip_reason(name, stamps, progress, DEFAULT_SKIP,
+                                 self._cutoff(), only, self._today())
+
+    def test_system_and_done_and_error(self):
+        progress = {"黄春健": {"messages": 10},
+                    "赵A事务所": {"error": "xxx"}}
+        stamps = {}
+        self.assertEqual(self._reason("文件传输助手", stamps, progress), "system")
+        self.assertEqual(self._reason("黄春健", stamps, progress), "done")
+        self.assertEqual(self._reason("赵A事务所", stamps, progress), "error")
+        # 变体命中已完成（断点容错；3 字短名单字差不判变体是既有设计）
+        self.assertEqual(self._reason("赵嫣嫣AI事务所", stamps, progress), "error")
+
+    def test_old_stamp_skipped_with_variant_fallback(self):
+        progress = {}
+        stamps = {"置顶老群读数": "2024/10"}
+        self.assertEqual(self._reason("置顶老群", stamps, progress), "old")
+        # 精确键
+        self.assertEqual(self._reason("置顶老群读数", stamps, progress), "old")
+
+    def test_recent_and_unjudgeable_extracted(self):
+        progress = {}
+        stamps = {"今天活跃": "19:30", "三月聊过": "03/15", "无戳": ""}
+        self.assertIsNone(self._reason("今天活跃", stamps, progress))
+        self.assertIsNone(self._reason("三月聊过", stamps, progress))
+        self.assertIsNone(self._reason("无戳", stamps, progress))   # 保守提取
+
+    def test_only_filter(self):
+        progress = {}
+        stamps = {"河美恬园8号楼业主群": "19:30"}
+        only = ["河美恬园8号楼业主群"]
+        self.assertIsNone(self._reason("河美恬园8号楼业主群", stamps, progress, only))
+        self.assertEqual(self._reason("无关群", stamps, progress, only), "not-only")
+        # 短请求名互含命中（经典 _match_only 同判据）
+        self.assertIsNone(self._reason("黄藏寺项目值班值守", {}, {}, ["黄藏寺项目值班"]), )
+
+
 class TestRenderWorkerAsyncDocx(unittest.TestCase):
     """docx 后台渲染（提速且零微信交互改动，2026-09-06 用户指示）：
     JSON 作业入队 → 渲染 → docx 落盘；失败留 .err 可复活；截图写线程

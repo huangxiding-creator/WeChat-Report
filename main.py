@@ -35,6 +35,8 @@ def main():
                         help="离线 JSON 数据源（可多次指定；用于回放/测试）")
     parser.add_argument("--all", action="store_true",
                         help="批量模式：枚举全部会话，每个聊天导出一份聊天记录 word")
+    parser.add_argument("--walk", action="store_true",
+                        help="批量顺走模式：列表自上而下逐项提取（无枚举/无逐名搜索，末尾漏补）")
     parser.add_argument("--limit", type=int, default=0,
                         help="批量模式试点：只处理前 N 个聊天（0=全部）")
     parser.add_argument("--only", default="",
@@ -68,7 +70,8 @@ def main():
         out_dir = Path(args.output) if args.output else cfg.output_dir / "批量导出"
         res = BatchExporter(cfg, on_progress=print).run(
             out_dir, time_window=args.window or "365d", limit=args.limit,
-            only=[x.strip() for x in args.only.split(",") if x.strip()] or None)
+            only=[x.strip() for x in args.only.split(",") if x.strip()] or None,
+            walk=args.walk)
         return 0 if res.failed == 0 else 1
 
     if args.cli:

@@ -49,7 +49,8 @@ class BatchExporter:
     def run(self, out_dir: Path, time_window: str = "365d",
             limit: int = 0, resume: bool = True,
             retry_failed: bool = True,
-            only: Optional[list[str]] = None) -> BatchResult:
+            only: Optional[list[str]] = None,
+            walk: bool = False) -> BatchResult:
         res = BatchResult()
         out_dir.mkdir(parents=True, exist_ok=True)
         render_q = out_dir / "_render_queue"
@@ -97,140 +98,167 @@ class BatchExporter:
         report_every = self.cfg.get_int("batch", "report_every", 5)
         skip_names = self._skip_names()
 
-        # 1. 枚举会话
+        # 1. 会话清单：顺走模式不整表枚举、不逐名搜索——列表本身就是
+        #    按最近活跃排好的清单，回顶后自上而下逐项点开提取，跳过判断
+        #    （系统/已完成/定向外/戳老）就地做，失败与漏项末尾统一漏补
+        #    （用户 2026-09-06 指示）；经典模式保持枚举+预过滤+回顶+逐名导航
         win = WeChatWindow().find()
         guard = SafetyGuard(input_zone_ratio=self.cfg.get_float(
             "safety", "input_zone_ratio", 0.80))
-        enumerator = SessionEnumerator(
-            win, guard, on_progress=self.say,
-            max_rounds=self.cfg.get_int("batch", "enum_rounds", 160))
-        names = enumerator.enumerate(skip=skip_names)
-        # 采戳自诊断：戳字典大小 + 年份戳样本（预过滤覆盖率异常时定位用）；
-        # 落盘供离线分析（快速滚动下老聊天 2024/* 淡灰戳漏采率高，需迭代）
-        st_n = len(enumerator.stamps)
-        st_year = sum(1 for v in enumerator.stamps.values()
-                      if any(y in v for y in ("2024", "2025", "2026", "2O24", "2U24")))
-        self.say(f"   采戳：{st_n} 名有时间戳（其中年份戳 {st_year}）")
-        try:
-            (out_dir / "_stamps.json").write_text(
-                json.dumps(enumerator.stamps, ensure_ascii=False, indent=1),
-                encoding="utf-8")
-        except OSError:
-            pass
-        deduped = dedupe_names(names)
-        if len(deduped) != len(names):
-            self.say(f"   枚举去重：{len(names)} → {len(deduped)}（OCR 变体合并）")
-        kept = self._prefilter_window(deduped, enumerator.stamps, time_window)
-        n_all = len(deduped)   # 预过滤前的全列表长度：滚动/扫描预算按真实高度
-        names = kept
-        if only:
-            hits = _match_only(names, only)
-            if not hits:
-                self.say(f"   ⚠ 定向名单无命中：{only}（枚举 {len(names)} 名）")
-                raise RuntimeError("定向名单无命中")
-            self.say(f"   定向名单：{len(names)} → {len(hits)} 个命中（请求 "
-                     f"{len(only)} 名）")
-            names = hits
-        if limit:
-            names = names[:limit]
-        res.total = len(names)
-        # 枚举后列表停在底部：回顶一次，后续按名单顺序自上而下扫最省时
-        # （400+ 项列表高 ~26,000px，必须按 expected_items 放大回顶预算，
-        #   默认 60 轮只滚 ~9,000px 会停在中段；注意预算用 n_all 而非
-        #   预过滤后的数量——窗内 100 项 × 65px 远小于列表真实高度）
-        from .extractor.navigator import scroll_session_list_to_top
-        scroll_session_list_to_top(win, guard, expected_items=n_all)
-        scope = (f"活跃 ≥ {year_sel.group(1)} 年（全量深度）" if year_sel
-                 else f"时间窗 {time_window}")
-        self.say(f"🎯 批量导出：{res.total} 个聊天，{scope}")
-        self._notify(f"【WeChat-Report 批量导出】启动\n目标聊天：{res.total} 个"
-                     f"\n范围：{scope}\n已完成（断点）：{len(progress)} 个")
+        if walk:
+            # 回顶预算用历史规模（~600 项列表高）；不精确枚举无真值
+            n_all = self.cfg.get_int("batch", "walk_top_budget", 650)
+            names: list[str] = []      # _walk_list 填充：走表见到的全部名
+        else:
+            enumerator = SessionEnumerator(
+                win, guard, on_progress=self.say,
+                max_rounds=self.cfg.get_int("batch", "enum_rounds", 160))
+            names = enumerator.enumerate(skip=skip_names)
+            # 采戳自诊断：戳字典大小 + 年份戳样本（预过滤覆盖率异常时定位用）
+            try:
+                (out_dir / "_stamps.json").write_text(
+                    json.dumps(enumerator.stamps, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+            except OSError:
+                pass
+            deduped = dedupe_names(names)
+            if len(deduped) != len(names):
+                self.say(f"   枚举去重：{len(names)} → {len(deduped)}（OCR 变体合并）")
+            kept = self._prefilter_window(deduped, enumerator.stamps, time_window)
+            n_all = len(deduped)   # 预过滤前的全列表长度：滚动/扫描预算按真实高度
+            names = kept
+            if only:
+                hits = _match_only(names, only)
+                if not hits:
+                    self.say(f"   ⚠ 定向名单无命中：{only}（枚举 {len(names)} 名）")
+                    raise RuntimeError("定向名单无命中")
+                self.say(f"   定向名单：{len(names)} → {len(hits)} 个命中（请求 "
+                         f"{len(only)} 名）")
+                names = hits
+            if limit:
+                names = names[:limit]
+            res.total = len(names)
+            # 枚举后列表停在底部：回顶一次，后续按名单顺序自上而下扫最省时
+            # （400+ 项列表高 ~26,000px，必须按 expected_items 放大回顶预算，
+            #   默认 60 轮只滚 ~9,000px 会停在中段；注意预算用 n_all 而非
+            #   预过滤后的数量——窗内 100 项 × 65px 远小于列表真实高度）
+            from .extractor.navigator import scroll_session_list_to_top
+            scroll_session_list_to_top(win, guard, expected_items=n_all)
+        scope = (f"活跃 ≥ {year_sel.group(1)} 年（全量深度·顺走）" if year_sel
+                 else f"时间窗 {time_window}（顺走）") if walk else (
+            f"活跃 ≥ {year_sel.group(1)} 年（全量深度）" if year_sel
+            else f"时间窗 {time_window}")
+        if walk:
+            self.say("🚶 顺走导出：列表自上而下逐项提取（无枚举/无逐名搜索）")
+            self._notify(f"【WeChat-Report 批量导出】启动\n模式：顺走（列表逐项）"
+                         f"\n范围：{scope}\n已完成（断点）：{len(progress)} 个")
+        else:
+            self.say(f"🎯 批量导出：{res.total} 个聊天，{scope}")
+            self._notify(f"【WeChat-Report 批量导出】启动\n目标聊天：{res.total} 个"
+                         f"\n范围：{scope}\n已完成（断点）：{len(progress)} 个")
 
         # 2. 逐个导出（docx 由渲染子进程并行生成——大文档实测 ~5 分钟，
         #    不让微信空闲等它；微信侧滚轮/点击/停顿节奏零改动）
         render_proc, render_log = _start_render_worker(render_q)
         render_errs: list[Path] = []
         t0 = time.monotonic()
-        try:
-            for i, name in enumerate(names, 1):
-                (render_q / "_driver_alive").write_text("", encoding="utf-8")
-                done_key = _progress_key(name, progress)
-                if done_key is not None:
-                    res.skipped += 1
-                    self.say(f"⏭ [{i}/{res.total}] 「{name}」已完成"
-                             f"（断点跳过：{done_key}）")
-                    continue
-                self.say(f"\n───── [{i}/{res.total}] 「{name}」 ─────")
-                ok = False
-                last_err: Optional[Exception] = None
-                for attempt in (1, 2):
-                    if attempt == 2:
-                        # fail-safe 人工碰角重试：等鼠标离开角落后原目标再试一次
-                        #（目标 1 实测：15 分钟上滚成果被一次碰角全部作废）。
-                        # 持续按住角落 = 人为停机，等待不打扰；杀进程仍可随时终止。
-                        if last_err is None or "fail-safe" not in str(last_err).lower():
-                            break
-                        self.say("   🖱 fail-safe（鼠标碰角）——等待鼠标离开角落后重试本聊天")
-                        _wait_mouse_off_corner(self.say)
-                    try:
-                        # 导航：滚动列表查找并打开（已有 open+verify 双重确认）
+
+        def export_one(name: str, label: str = "", open_via=None,
+                       expected_items: int = 0) -> Optional[Exception]:
+            """单聊天导出：打开（open_via 或经典导航搜索）→ 采集 → docx
+            排队渲染 → 记进度（增量落盘）。成功返回 None，否则最后异常。"""
+            last_err: Optional[Exception] = None
+            for attempt in (1, 2):
+                if attempt == 2:
+                    # fail-safe 人工碰角重试：等鼠标离开角落后原目标再试一次
+                    #（目标 1 实测：15 分钟上滚成果被一次碰角全部作废）。
+                    # 持续按住角落 = 人为停机，等待不打扰；杀进程仍可随时终止。
+                    if last_err is None or "fail-safe" not in str(last_err).lower():
+                        break
+                    self.say("   🖱 fail-safe（鼠标碰角）——等待鼠标离开角落后重试本聊天")
+                    _wait_mouse_off_corner(self.say)
+                try:
+                    if open_via is not None:
+                        # 顺走：新鲜复读视口 + 变体匹配点击（列表可能已重排）
+                        if not open_via():
+                            raise RuntimeError("点击后标题验证失败（列表重排或匹配失败）")
+                    else:
+                        # 经典：滚动列表查找并打开（已有 open+verify 双重确认）；
+                        # start_from_current：名单按列表序，从当前位置续扫省时；
+                        # expected_items：按列表总长放大扫描轮数
                         nav = WeChatNavigator(win, guard,
                                               settle_wait=self.cfg.get_float(
                                                   "extract", "settle_wait", 1.5),
                                               input_zone_ratio=guard.input_zone_ratio)
-                        # start_from_current：名单按列表顺序排列，从当前位置续扫省时；
-                        # expected_items：按列表总长放大扫描轮数（活跃账号 200+ 项）
                         if not nav.open_chat(name, on_progress=self.say,
-                                             expected_items=n_all,
+                                             expected_items=expected_items or n_all,
                                              start_from_current=True):
                             raise RuntimeError("会话列表中未找到（或点击验证失败）")
-                        # 采集（already_open：跳过 extract 内部导航；年份令牌下
-                        # capture_window="" → 全量深度到真顶）
-                        chat = ext.extract(name, capture_window, self.say,
-                                           already_open=True)
-                        # docx 渲染排队（子进程并行）：JSON 已在 extract 内落盘，
-                        # 进度即时可记（断点语义不变），docx 名预知供验收核对
-                        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        docx_path = out_dir / f"{_safe(name)}_聊天记录_{stamp}.docx"
-                        _enqueue_render_job(render_q, {
-                            "name": name,
-                            "json_path": str(out_dir / f"{_safe(name)}_messages.json"),
-                            "docx_path": str(docx_path),
-                            "time_window": capture_window,
-                            "max_images": max_images,
-                        })
-                        self.say(f"💾 「{name}」采集完成：{len(chat.messages)} 条，"
-                                 f"docx 后台渲染已排队")
-                        res.done += 1
-                        res.messages += len(chat.messages)
-                        res.docx_files.append(str(docx_path))
-                        progress[name] = {"messages": len(chat.messages),
-                                          "docx": str(docx_path),
-                                          "at": datetime.now().isoformat(timespec="seconds")}
-                        self._save_progress(progress_path, progress)
-                        if res.done % report_every == 0:
-                            el = int(time.monotonic() - t0)
-                            avg = el // max(res.done, 1)
-                            eta = avg * (res.total - i)
-                            self._notify(f"【批量导出进度】{i}/{res.total}\n"
-                                         f"已完成 {res.done} · 失败 {res.failed} · "
-                                         f"累计 {res.messages} 条\n"
-                                         f"平均 {avg}s/个 · 预计剩余 ≈ {eta // 60} 分钟")
-                        ok = True
-                        break
-                    except Exception as e:
-                        last_err = e
-                if not ok:
-                    res.failed += 1
-                    res.errors[name] = str(last_err)[:200]
-                    self.say(f"   ✗ 「{name}」失败：{last_err}")
-                    log.warning("导出 %s 失败：%s", name, last_err, exc_info=True)
-                    # 失败也记录，避免断点重跑时反复撞墙
-                    progress[name] = {"error": str(last_err)[:200],
+                    # 采集（already_open：跳过 extract 内部导航；年份令牌下
+                    # capture_window="" → 全量深度到真顶）
+                    chat = ext.extract(name, capture_window, self.say,
+                                       already_open=True)
+                    # docx 渲染排队（子进程并行）：JSON 已在 extract 内落盘，
+                    # 进度即时可记（断点语义不变），docx 名预知供验收核对
+                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    docx_path = out_dir / f"{_safe(name)}_聊天记录_{stamp}.docx"
+                    _enqueue_render_job(render_q, {
+                        "name": name,
+                        "json_path": str(out_dir / f"{_safe(name)}_messages.json"),
+                        "docx_path": str(docx_path),
+                        "time_window": capture_window,
+                        "max_images": max_images,
+                    })
+                    self.say(f"💾 「{name}」采集完成：{len(chat.messages)} 条，"
+                             f"docx 后台渲染已排队")
+                    res.done += 1
+                    res.messages += len(chat.messages)
+                    res.docx_files.append(str(docx_path))
+                    progress[name] = {"messages": len(chat.messages),
+                                      "docx": str(docx_path),
                                       "at": datetime.now().isoformat(timespec="seconds")}
                     self._save_progress(progress_path, progress)
-                # 每个聊天之间稍歇，降低微信渲染压力
-                time.sleep(0.5)
+                    if res.done % report_every == 0:
+                        el = int(time.monotonic() - t0)
+                        avg = el // max(res.done, 1)
+                        self._notify(f"【批量导出进度】{label}{res.done} 完成\n"
+                                     f"失败 {res.failed} · 累计 {res.messages} 条\n"
+                                     f"平均 {avg}s/个")
+                    return None
+                except Exception as e:
+                    last_err = e
+            return last_err
+
+        def note_failure(name: str, err: Exception) -> None:
+            res.failed += 1
+            res.errors[name] = str(err)[:200]
+            self.say(f"   ✗ 「{name}」失败：{err}")
+            log.warning("导出 %s 失败：%s", name, err, exc_info=True)
+            # 失败也记录，避免断点重跑时反复撞墙
+            progress[name] = {"error": str(err)[:200],
+                              "at": datetime.now().isoformat(timespec="seconds")}
+            self._save_progress(progress_path, progress)
+
+        try:
+            if walk:
+                self._walk_list(win, guard, ext, out_dir, progress_path,
+                                progress, time_window, limit, only, res,
+                                export_one, note_failure)
+            else:
+                for i, name in enumerate(names, 1):
+                    (render_q / "_driver_alive").write_text("", encoding="utf-8")
+                    done_key = _progress_key(name, progress)
+                    if done_key is not None:
+                        res.skipped += 1
+                        self.say(f"⏭ [{i}/{res.total}] 「{name}」已完成"
+                                 f"（断点跳过：{done_key}）")
+                        continue
+                    self.say(f"\n───── [{i}/{res.total}] 「{name}」 ─────")
+                    err = export_one(name, label=f"[{i}/{res.total}]")
+                    if err is not None:
+                        note_failure(name, err)
+                    # 每个聊天之间稍歇，降低微信渲染压力
+                    time.sleep(0.5)
         finally:
             # 渲染队列收尾：停机标记 → 等排空（末尾若干 docx 补完）
             _drain_render_queue(render_q, render_proc, self.say)
@@ -253,6 +281,156 @@ class BatchExporter:
         return res
 
     # ------------------------------------------------------------ helpers
+    def _walk_list(self, win, guard, ext, out_dir: Path, progress_path: Path,
+                   progress: dict, time_window: str, limit: int,
+                   only: Optional[list[str]], res: BatchResult,
+                   export_one, note_failure) -> None:
+        """顺走模式（用户 2026-09-06 指示）：回顶后自上而下逐视口走表，
+        逐项点开提取；跳过判断就地在走表时做；失败/漏项末尾统一漏补。
+
+        相比枚举+逐名搜索：无整表枚举（每次重启省 ~10 分钟）、无逐名
+        列表搜索（列表滚一遍而非 N 遍）——微信侧交互量只减不增，节奏
+        （滚 4 档 + 停顿 + 点击 settle）与枚举/经典导航同速。
+        """
+        from .extractor.capture import ScreenCapture
+        from .extractor.navigator import (scroll_session_list,
+                                          scroll_session_list_to_top)
+        from .extractor.ocr import OCRParser
+        from .extractor.session_enum import (cluster_sessions,
+                                             merge_round_names)
+        say = self.say
+        cutoff = _window_cutoff(time_window)
+        skip_names = self._skip_names()
+        win.activate()      # 含最小化恢复（用户用电脑时收起微信是常态）
+        region = win.session_list_rect()
+        cap = ScreenCapture(region)
+        ocr = OCRParser(0.4)
+        nav = WeChatNavigator(win, guard,
+                              settle_wait=self.cfg.get_float(
+                                  "extract", "settle_wait", 1.5),
+                              input_zone_ratio=guard.input_zone_ratio)
+        say("🚶 顺走模式：回顶后自上而下逐项提取 …")
+        if not scroll_session_list_to_top(win, guard, expected_items=650):
+            say("   ⚠ 回顶未确认，仍从当前位置走（顶部段由漏补兜底）")
+        stamps: dict[str, str] = {}
+        names: list[str] = []
+        seen: set[str] = set()
+        prev_screen: list[str] = []
+        attempted: set[str] = set()
+        skipped_done: set[str] = set()
+        skipped_old: set[str] = set()
+        done_this_run = 0
+        stable = 0
+        bottom_verify = 0   # 底验证（与枚举同口径：零新增≠到底，冲冻复验）
+        max_rounds = self.cfg.get_int("batch", "enum_rounds", 160)
+        walked_out = False
+        for rnd in range(max_rounds):
+            # 一次推理分级阈值（与枚举同口径）：名称 0.4，采戳 0.28
+            blocks = ocr.parse_raw(cap.grab(), floor=0.28)
+            texts = [t for t in blocks if t["score"] >= 0.4]
+            found = cluster_sessions(texts, list_width=region[2],
+                                     with_stamp=True, stamp_texts=blocks)
+            for name, _y, st in found:
+                if st:
+                    stamps[name] = st
+            found_names = [n for n, _y, _st in found]
+            genuine = merge_round_names(names, seen, found_names, prev_screen)
+            prev_screen = found_names
+            for name, _y, _st in found:
+                reason = _walk_skip_reason(name, stamps, progress, skip_names,
+                                           cutoff, only)
+                if reason == "done":
+                    skipped_done.add(name)
+                    continue
+                if reason == "old":
+                    skipped_old.add(name)
+                    continue
+                if reason is not None:      # system / not-only / error
+                    continue
+                say(f"\n───── 「{name}」 ─────")
+                attempted.add(name)
+                # 点击前新鲜复读视口（上一项采集可能耗时 1-2h，列表已重排，
+                # 旧坐标会点错对象——click_session 内部处理）
+                err = export_one(
+                    name,
+                    open_via=lambda nm=name: nav.click_session(
+                        nm, on_progress=self.say))
+                if err is None:
+                    done_this_run += 1
+                else:
+                    note_failure(name, err)
+                # 每个聊天之间稍歇，降低微信渲染压力（与经典模式一致）
+                time.sleep(0.5)
+                if limit and done_this_run >= limit:
+                    say(f"⏹ 本轮 limit={limit} 已达，顺走提前收束（剩余项"
+                        "下次断点续走或漏补）")
+                    walked_out = True
+                    break
+            if walked_out:
+                break
+            # 到底检测：连续零新增 → 大力滚动冲开冻结复验，3 次均无新增才认底
+            if genuine == 0:
+                stable += 1
+                if stable >= 3:
+                    if bottom_verify >= 3:
+                        say(f"   会话列表已走完（共见 {len(names)} 个会话，"
+                            "3 次底验证均无新增）")
+                        break
+                    bottom_verify += 1
+                    stable = 0
+                    say(f"   疑似到底（{len(names)} 个），"
+                        f"大力滚动验证 {bottom_verify}/3 …")
+                    scroll_session_list(win, guard, -120, 24, pause=0.1)
+                    time.sleep(2.0)
+            else:
+                stable = 0
+                bottom_verify = 0
+            scroll_session_list(win, guard, -120, 4, pause=0.1)
+            time.sleep(0.3)
+            if rnd % 5 == 4:
+                say(f"   顺走中：已见 {len(names)} 个会话"
+                    f"（本轮新采 {done_this_run} 个）")
+        else:
+            say(f"   ⚠ 顺走轮数预算用尽（{max_rounds}），未确认到底——"
+                "尾部项由漏补与下次断点续走兜底")
+        self._save_stamps(out_dir, stamps)
+        res.total = len(names)
+        res.skipped = len(skipped_done)
+        say(f"📋 顺走收束：见 {len(names)} 项 · 提取 {done_this_run} · "
+            f"断点跳过 {len(skipped_done)} · 戳老跳过 {len(skipped_old)}")
+        if not walked_out:
+            self._walk_fill(names, stamps, progress, skip_names, cutoff,
+                            only, res, export_one, note_failure)
+
+    def _walk_fill(self, names: list[str], stamps: dict[str, str],
+                   progress: dict, skip_names: tuple[str, ...], cutoff,
+                   only: Optional[list[str]], res: BatchResult,
+                   export_one, note_failure) -> None:
+        """漏补（用户 2026-09-06 指示）：走表失败的项最后统一重试，
+        用经典 open_chat 搜索模式（项数少，搜索成本可接受）。"""
+        todo = [n for n in names
+                if _walk_skip_reason(n, stamps, progress, skip_names,
+                                     cutoff, only) == "error"]
+        if not todo:
+            self.say("🧩 漏补：无缺项")
+            return
+        self.say(f"🧩 漏补：{len(todo)} 个失败项重试（经典搜索模式）")
+        for name in todo:
+            self.say(f"\n───── [漏补] 「{name}」 ─────")
+            err = export_one(name, label="[漏补] ", expected_items=len(names))
+            if err is not None:
+                note_failure(name, err)
+            time.sleep(0.5)
+
+    @staticmethod
+    def _save_stamps(out_dir: Path, stamps: dict[str, str]) -> None:
+        try:
+            (out_dir / "_stamps.json").write_text(
+                json.dumps(stamps, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+        except OSError:
+            pass
+
     def _prefilter_window(self, names: list[str], stamps: dict[str, str],
                           time_window: str, today=None) -> list[str]:
         """按列表时间戳预过滤：戳明确早于截止日的聊天直接跳过。
@@ -339,6 +517,40 @@ class BatchExporter:
 def _safe(name: str) -> str:
     return "".join(c if (c.isalnum() or c in "-_一-龥") else "_"
                    for c in name).strip("_")[:60] or "chat"
+
+
+def _walk_skip_reason(name: str, stamps: dict[str, str], progress: dict,
+                      skip_names: tuple[str, ...], cutoff,
+                      only: Optional[list[str]] = None,
+                      today=None) -> Optional[str]:
+    """顺走模式逐项跳过判定（纯函数可单测，用户 2026-09-06 指示）。
+
+    返回 'system' / 'not-only' / 'done' / 'error' / 'old' 之一，None=应提取。
+    戳经变体兜底关联（走表名与采戳读数可能是不同 OCR 变体）；
+    无戳/坏读数 → 保守提取（与经典预过滤同语义）。
+    """
+    if name in skip_names:
+        return "system"
+    if only is not None:
+        from .extractor.navigator import name_variant
+        if not any(name == o or name_variant(name, o) or o in name
+                   or name in o for o in only):
+            return "not-only"
+    key = _progress_key(name, progress)
+    if key is not None:
+        return "error" if "error" in progress[key] else "done"
+    if cutoff is not None:
+        from .extractor.navigator import name_variant
+        from .extractor.session_enum import stamp_older_than
+        st = stamps.get(name, "")
+        if not st:
+            for k in stamps:
+                if name_variant(name, k):
+                    st = stamps[k]
+                    break
+        if stamp_older_than(st, cutoff, today) is True:
+            return "old"
+    return None
 
 
 def _window_cutoff(time_window: str):

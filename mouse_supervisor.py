@@ -36,7 +36,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 
 DEFAULT_CMD = [sys.executable, "-u", "-X", "utf8", "main.py", "--cli",
-               "--all", "--window", "2026", "--output", "./output/批量导出"]
+               "--all", "--walk", "--window", "2026",
+               "--output", "./output/批量导出"]
 
 DUMMY_CODE = (
     "import time\n"
@@ -107,6 +108,7 @@ user32 = ctypes.windll.user32
 user32.SetWindowsHookExW.argtypes = (
     ctypes.c_int, _HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD)
 user32.SetWindowsHookExW.restype = wintypes.HHOOK
+user32.UnhookWindowsHookEx.argtypes = (wintypes.HHOOK,)
 user32.CallNextHookEx.argtypes = (
     wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 user32.CallNextHookEx.restype = ctypes.c_ssize_t
