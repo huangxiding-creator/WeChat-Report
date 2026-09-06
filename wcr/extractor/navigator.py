@@ -212,12 +212,24 @@ def scroll_session_list_to_top(win, guard: SafetyGuard,
     t0 = time.monotonic()
     time.sleep(0.3)   # 先等调用方的滚动动画结束，防动量伪影
     for i in range(est):
-        # 前 2 轮也检查（已在顶部时秒回）；中段盲滚（不可能到顶）
-        if i < 2 or i >= blind:
+        # 前 2 轮也检查（已在顶部时秒回）；中段盲滚（不可能到顶）。
+        # 检查用廉价探针（1 次 OCR 判锚点可见，零滚动）：直接跑完整确认
+        # 会把检查段拖到 ~15s/轮（2026-09-06 实测 180→240 轮 929s——中段
+        # 锚点必不可见，下退自愈 + 上推验证全是白费，下退还倒抵爬升）；
+        # 探针命中才做完整确认，另每 30 轮兜底一次完整确认（过顶态锚点
+        # 被折叠出视野时探针永不命中，靠兜底下退自愈回锚点位）。
+        if i < 2:
             if _confirm_list_top(win, cap, ocr, guard):
                 log.info("回顶确认（第 %d/%d 轮，%.0fs）", i + 1, est,
                          time.monotonic() - t0)
                 return True
+        elif i >= blind:
+            if at_list_top(ocr.parse(cap.grab())) \
+                    or (i - blind) % 30 == 29:
+                if _confirm_list_top(win, cap, ocr, guard):
+                    log.info("回顶确认（第 %d/%d 轮，%.0fs）", i + 1, est,
+                             time.monotonic() - t0)
+                    return True
         if i and i % 60 == 0:
             log.info("回顶中：%d/%d 轮（%.0fs）", i, est, time.monotonic() - t0)
         if time.monotonic() - t0 > time_budget:
