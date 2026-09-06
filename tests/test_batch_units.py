@@ -1279,6 +1279,40 @@ class TestLogTailFailsafe(unittest.TestCase):
         self.assertFalse(_log_tail_has_failsafe(Path("Z:/不存在/x.log")))
 
 
+class TestWalkResumeMarker(unittest.TestCase):
+    """续走锚判定（2026-09-06 效率优化：驱动被杀后列表位置存续，标记名
+    仍在视口 → 免 10-25 分钟回顶直接续走；不在 → 照旧回顶全走）。"""
+
+    def test_exact_and_variant_hit(self):
+        from wcr.batch import _walk_resume_hits
+        found = [("黄春健", 90), ("刘亚飞P6郑州", 150)]
+        self.assertTrue(_walk_resume_hits("刘亚飞P6郑州", found))   # 精确
+        # OCR 变体读法（点击/跳过用的同一判据族）
+        self.assertTrue(_walk_resume_hits("赵嫣嫣AI事务所",
+                                          [("赵A事务所", 90)]))
+
+    def test_absent_falls_back(self):
+        from wcr.batch import _walk_resume_hits
+        found = [("黄春健", 90), ("河美恬园8号楼业主群", 150)]
+        self.assertFalse(_walk_resume_hits("刘亚飞P6郑州", found))
+
+    def test_empty_marker_never_resumes(self):
+        from wcr.batch import _walk_resume_hits
+        self.assertFalse(_walk_resume_hits("", [("黄春健", 90)]))
+        self.assertFalse(_walk_resume_hits("", []))
+
+    def test_marker_file_roundtrip(self):
+        import tempfile
+        from wcr.batch import (_clear_walk_marker, _load_walk_marker,
+                               _save_walk_marker)
+        p = Path(tempfile.mkdtemp()) / "_walk_marker.json"
+        self.assertEqual(_load_walk_marker(p), "")       # 缺失 → 空
+        _save_walk_marker(p, "刘亚飞P6郑州")
+        self.assertEqual(_load_walk_marker(p), "刘亚飞P6郑州")
+        _clear_walk_marker(p)
+        self.assertEqual(_load_walk_marker(p), "")
+
+
 class TestWalkSkipReason(unittest.TestCase):
     """顺走模式逐项跳过判定（用户 2026-09-06 指示：从上往下逐一提取、
     最后漏补）。"""

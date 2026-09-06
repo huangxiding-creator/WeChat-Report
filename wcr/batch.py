@@ -310,8 +310,27 @@ class BatchExporter:
                                   "extract", "settle_wait", 1.5),
                               input_zone_ratio=guard.input_zone_ratio)
         say("🚶 顺走模式：回顶后自上而下逐项提取 …")
-        if not scroll_session_list_to_top(win, guard, expected_items=650):
-            say("   ⚠ 回顶未确认，仍从当前位置走（顶部段由漏补兜底）")
+        # 断点续走（2026-09-06 效率优化）：驱动被暂停杀掉只是进程死——
+        # 微信窗口与列表滚动位置原样存续。标记名（上一处理项）仍在当前
+        # 视口 = 走表位置未漂移 → 免回顶直接续走（实测一次回顶 10-25
+        # 分钟，用户接管频繁时每次重启都白付）；不可见（用户手滚过/新
+        # 消息重排/首轮未走）→ 照旧回顶全走，语义与首轮完全一致。
+        marker_path = out_dir / "_walk_marker.json"
+        marker = _load_walk_marker(marker_path)
+        resumed = False
+        if marker:
+            blocks0 = ocr.parse_raw(cap.grab(), floor=0.28)
+            found0 = cluster_sessions(
+                [t for t in blocks0 if t["score"] >= 0.4],
+                list_width=region[2])
+            if _walk_resume_hits(marker, found0):
+                resumed = True
+                say(f"↩ 续走：标记「{marker}」在当前视口——免回顶，从当前位置继续")
+        if not resumed:
+            n_budget = self.cfg.get_int("batch", "walk_top_budget", 650)
+            if not scroll_session_list_to_top(win, guard,
+                                              expected_items=n_budget):
+                say("   ⚠ 回顶未确认，仍从当前位置走（顶部段由漏补兜底）")
         stamps: dict[str, str] = {}
         names: list[str] = []
         seen: set[str] = set()
@@ -337,6 +356,9 @@ class BatchExporter:
             genuine = merge_round_names(names, seen, found_names, prev_screen)
             prev_screen = found_names
             for name, _y, _st in found:
+                # 走表位置标记（续走锚）：逐项更新——被杀重启后标记名若
+                # 仍在视口即免回顶续走（跳过项也更新：位置推进才算数）
+                _save_walk_marker(marker_path, name)
                 reason = _walk_skip_reason(name, stamps, progress, skip_names,
                                            cutoff, only)
                 if reason == "done":
@@ -393,6 +415,11 @@ class BatchExporter:
         else:
             say(f"   ⚠ 顺走轮数预算用尽（{max_rounds}），未确认到底——"
                 "尾部项由漏补与下次断点续走兜底")
+        # 走表收束：清续走标记（下次运行完整走表复核，兜住本轮中段续走
+        # 未复查的顶部段——完整走对已完成项是 ~0.3s/项的快扫）
+        _clear_walk_marker(marker_path)
+        if resumed:
+            say("   ⚠ 本轮自中段续走：顶部段未复查——下次完整走表/验收核对兜底")
         self._save_stamps(out_dir, stamps)
         res.total = len(names)
         res.skipped = len(skipped_done)
@@ -517,6 +544,38 @@ class BatchExporter:
 def _safe(name: str) -> str:
     return "".join(c if (c.isalnum() or c in "-_一-龥") else "_"
                    for c in name).strip("_")[:60] or "chat"
+
+
+def _load_walk_marker(p: Path) -> str:
+    """读走表位置标记（续走锚）。缺失/坏 JSON → 空（走回顶全走）。"""
+    try:
+        return json.loads(p.read_text(encoding="utf-8")).get("name", "")
+    except Exception:
+        return ""
+
+
+def _save_walk_marker(p: Path, name: str) -> None:
+    try:
+        p.write_text(json.dumps({"name": name}, ensure_ascii=False),
+                     encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_walk_marker(p: Path) -> None:
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
+def _walk_resume_hits(marker: str, found) -> bool:
+    """续走判定（纯函数可单测）：标记名与当前视口聚簇结果变体匹配
+    （match_session 同判据——精确/子串/name_variant 三级）。"""
+    if not marker:
+        return False
+    from .extractor.navigator import match_session
+    return match_session(marker, found) is not None
 
 
 def _walk_skip_reason(name: str, stamps: dict[str, str], progress: dict,
