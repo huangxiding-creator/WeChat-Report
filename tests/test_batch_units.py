@@ -1217,6 +1217,39 @@ class TestWindowFindStrict(unittest.TestCase):
             self._find([self._W("微信聊天记录.txt - 记事本")])
 
 
+class TestMouseGateState(unittest.TestCase):
+    """鼠标接管监督器状态机（用户 2026-09-06 指示：人动鼠标暂停、
+    静默 >30s 自动接续）。boot 视为早已静默 → 首个空闲 tick 即接续；
+    循环（停→续→停）计数正确。"""
+
+    def test_boot_resumes_immediately_when_idle(self):
+        from mouse_supervisor import GateState
+        g = GateState(idle_s=30.0, boot_now=1000.0)
+        self.assertEqual(g.tick(1000.4), "resume")
+        self.assertEqual(g.state, GateState.RUNNING)
+
+    def test_activity_pauses_and_refreshes(self):
+        from mouse_supervisor import GateState
+        g = GateState(idle_s=30.0, boot_now=1000.0)
+        g.tick(1000.4)
+        self.assertTrue(g.on_activity(1001.0))    # 运行中活动 → 暂停
+        self.assertFalse(g.on_activity(1002.0))   # 已暂停：只刷新静默计时
+        self.assertIsNone(g.tick(1002.0 + 29.0))  # 未满 30s 不接续
+        self.assertEqual(g.tick(1002.0 + 30.1), "resume")
+
+    def test_repeated_cycles(self):
+        from mouse_supervisor import GateState
+        g = GateState(idle_s=30.0, boot_now=0.0)
+        self.assertEqual(g.tick(10.0), "resume")     # 首发接续
+        for t in (100.0, 300.0):
+            self.assertTrue(g.on_activity(t))        # 运行中活动 → 暂停
+            self.assertIsNone(g.tick(t + 29.0))      # 未满静默窗不接续
+            self.assertFalse(g.on_activity(t + 29.5))  # 活动刷新计时
+            self.assertIsNone(g.tick(t + 50.0))      # 50-29.5=20.5 <30
+            self.assertEqual(g.tick(t + 60.0), "resume")
+        self.assertEqual((g.n_pauses, g.n_resumes), (2, 3))
+
+
 class TestRenderWorkerAsyncDocx(unittest.TestCase):
     """docx 后台渲染（提速且零微信交互改动，2026-09-06 用户指示）：
     JSON 作业入队 → 渲染 → docx 落盘；失败留 .err 可复活；截图写线程

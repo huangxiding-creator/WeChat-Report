@@ -38,3 +38,10 @@ build/
 .vscode/
 Thumbs.db
 .DS_Store
+
+# 监督器运行产物与本机自测脚本（不入库）
+_supervisor.lock
+_hook_probe.py
+_inject_wiggle.py
+_supervisor_test*.log
+_dummy_driver.log
