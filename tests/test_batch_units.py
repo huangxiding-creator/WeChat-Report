@@ -1250,6 +1250,35 @@ class TestMouseGateState(unittest.TestCase):
         self.assertEqual((g.n_pauses, g.n_resumes), (2, 3))
 
 
+class TestLogTailFailsafe(unittest.TestCase):
+    """fail-safe 崩溃识别：2026-09-06 16:09 实测用户甩角把驱动 rc=1 杀死，
+    监督器误判"异常退出"而退场——应识别为用户接管，转暂停等静默接续。"""
+
+    def _log(self, lines):
+        import tempfile
+        p = Path(tempfile.mkdtemp()) / "driver.log"
+        p.write_text("\n".join(lines), encoding="utf-8")
+        return p
+
+    def test_tail_with_failsafe_true(self):
+        from mouse_supervisor import _log_tail_has_failsafe
+        p = self._log([f"DUMMY 心跳 {i}" for i in range(80)]
+                      + ["pyautogui.FailSafeException: PyAutoGUI fail-safe "
+                         "triggered from mouse moving to a corner"])
+        self.assertTrue(_log_tail_has_failsafe(p))
+
+    def test_old_failsafe_scrolled_out(self):
+        from mouse_supervisor import _log_tail_has_failsafe
+        # 旧崩溃已滚出末 60 行 → 不再误判为 fail-safe（真 bug 照常响亮退出）
+        p = self._log(["FailSafeException: 旧崩溃"]
+                      + [f"正常日志 {i}" for i in range(80)])
+        self.assertFalse(_log_tail_has_failsafe(p))
+
+    def test_missing_file_false(self):
+        from mouse_supervisor import _log_tail_has_failsafe
+        self.assertFalse(_log_tail_has_failsafe(Path("Z:/不存在/x.log")))
+
+
 class TestWalkSkipReason(unittest.TestCase):
     """顺走模式逐项跳过判定（用户 2026-09-06 指示：从上往下逐一提取、
     最后漏补）。"""

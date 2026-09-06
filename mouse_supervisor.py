@@ -191,6 +191,19 @@ def _kill_tree(pid: int) -> None:
                    capture_output=True)
 
 
+def _log_tail_has_failsafe(path: Path, lines: int = 60) -> bool:
+    """驱动日志尾部是否有 fail-safe 崩溃（甩角紧急停止）痕迹。"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 16 * 1024))
+            tail = f.read().decode("utf-8", "ignore").splitlines()
+        return "FailSafeException" in "\n".join(tail[-lines:])
+    except OSError:
+        return False
+
+
 def _single_instance() -> bool:
     """防止双监督器（双驱动=双进程操作微信，绝对禁止）。"""
     import msvcrt
@@ -260,11 +273,21 @@ def main(argv=None) -> int:
             if proc is not None and gate.state == GateState.RUNNING:
                 rc = proc.poll()
                 if rc is not None:
-                    _say(("🎉 驱动自然退出（rc=0）——批量完成？"
-                          if rc == 0 else
-                          f"✗ 驱动异常退出 rc={rc}（详见 {log_name}）")
-                         + "，监督器退出")
-                    return 0 if rc == 0 else 1
+                    if rc == 0:
+                        _say("🎉 驱动自然退出（rc=0）——批量完成？监督器退出")
+                        return 0
+                    if _log_tail_has_failsafe(ROOT / log_name):
+                        # 甩角紧急停止：pyautogui fail-safe 检查在每次调用都
+                        # 触发，比监督器 0.4s tick 更快命中——视为用户接管
+                        # 暂停（非异常退出）。静默 30s 后重启驱动；若鼠标仍
+                        # 停在角落，驱动启动门会礼貌等待（不反复撞 fail-safe）。
+                        _say(f"🖐 驱动被 fail-safe 打断（rc={rc}，鼠标碰角）"
+                             "——视为用户接管，暂停")
+                        gate.on_activity(time.monotonic())
+                        proc = None
+                        continue
+                    _say(f"✗ 驱动异常退出 rc={rc}（详见 {log_name}），监督器退出")
+                    return 1
     except KeyboardInterrupt:
         _say("监督器收到 Ctrl+C，退出（驱动不动）")
         return 130
